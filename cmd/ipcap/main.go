@@ -106,6 +106,7 @@ func agentListenCmd() *cobra.Command {
 	f.StringVar(&opts.SrcName, "src-name", "", "source name")
 	f.StringVar(&opts.ListenAddr, "listen", ":7878", "Noise listen address")
 	f.BoolVar(&opts.Compress, "compress", true, "zstd-compress packet batches on the link")
+	f.StringVar(&opts.KeylogFile, "keylog-file", "", "NSS keylog file (from eCapture) to relay as TLS_KEYLOG")
 	f.StringVar(&keyFile, "key", "/etc/ipcap/agent.key", "this agent's private key file (base64)")
 	f.StringSliceVar(&peerB64s, "peer", nil, "authorized collector public key (base64; repeatable)")
 	return cmd
@@ -138,6 +139,7 @@ func collectorCmd() *cobra.Command {
 	f.StringVar(&opts.ListenAddr, "listen", ":4242", "local PCAP-over-IP re-serve address")
 	f.StringVar(&opts.MetricsAddr, "metrics-addr", "", "Prometheus /metrics address (empty disables)")
 	f.IntVar(&opts.NoisePort, "noise-port", 0, "override the agent listener port (0 = vulnbox.yml); for per-source instances")
+	f.StringVar(&opts.SSLKeylogF, "sslkeylog-file", "", "write received TLS_KEYLOG lines to this SSLKEYLOGFILE (empty disables)")
 	f.Uint32Var(&opts.Snaplen, "snaplen", 65536, "snap length")
 	f.StringVar(&keyFile, "key", "/etc/ipcap/collector.key", "this collector's private key file (base64)")
 	return cmd

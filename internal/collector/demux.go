@@ -29,15 +29,16 @@ type Demux struct {
 	mirror *Mirror
 	ackOut io.Writer
 	m      *Metrics
+	keylog *KeylogSink
 
 	lastAckAt   time.Time
 	committedAt uint64
 	headGpidx   uint64
 }
 
-// NewDemux builds a demux for one source. m may be nil.
-func NewDemux(srcID uint16, name string, mirror *Mirror, ackOut io.Writer, m *Metrics) *Demux {
-	return &Demux{srcID: srcID, name: name, mirror: mirror, ackOut: ackOut, m: m}
+// NewDemux builds a demux for one source. m and keylog may be nil.
+func NewDemux(srcID uint16, name string, mirror *Mirror, ackOut io.Writer, m *Metrics, keylog *KeylogSink) *Demux {
+	return &Demux{srcID: srcID, name: name, mirror: mirror, ackOut: ackOut, m: m, keylog: keylog}
 }
 
 // Run reads the preamble then frames until the connection ends or ctx cancels.
@@ -103,6 +104,10 @@ func (d *Demux) Run(ctx context.Context, in io.Reader) error {
 		case proto.FrameStats:
 			if st, derr := proto.DecodeStats(f.Payload); derr == nil {
 				d.m.onStats(st)
+			}
+		case proto.FrameTLSKeylog:
+			if err := d.keylog.Write(f.Payload); err != nil {
+				return err
 			}
 		case proto.FrameSrcInfo:
 			// informational

@@ -29,6 +29,7 @@ type Options struct {
 	ListenAddr  string // local PCAP-over-IP re-serve, e.g. ":4242"
 	MetricsAddr string // Prometheus /metrics address, e.g. ":9100" ("" disables)
 	NoisePort   int    // override the agent listener port (0 = use vulnbox.yml); for per-source instances
+	SSLKeylogF  string // write received TLS_KEYLOG lines here ("" disables)
 	Snaplen     uint32
 	Key         transport.Keypair // collector's own static keypair
 }
@@ -80,6 +81,15 @@ func Run(ctx context.Context, opts Options) error {
 		}()
 	}
 
+	var keylog *KeylogSink
+	if opts.SSLKeylogF != "" {
+		keylog, err = OpenKeylogSink(opts.SSLKeylogF)
+		if err != nil {
+			return err
+		}
+		defer keylog.Close()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -108,7 +118,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 
 		resume := mirror.Committed()
-		if err := runOnce(ctx, opts, vb, agentPub, mirror, m, resume); err != nil {
+		if err := runOnce(ctx, opts, vb, agentPub, mirror, m, keylog, resume); err != nil {
 			log.Printf("collector: src%d session ended: %v", opts.SrcID, err)
 		}
 		if sleepCtx(ctx, 2*time.Second) {
@@ -119,7 +129,7 @@ func Run(ctx context.Context, opts Options) error {
 
 // runOnce dials the agent, sends the resume point, and drains until the session
 // ends.
-func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []byte, mirror *Mirror, m *Metrics, resume uint64) error {
+func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []byte, mirror *Mirror, m *Metrics, keylog *KeylogSink, resume uint64) error {
 	sessCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -151,7 +161,7 @@ func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []by
 		return err
 	}
 
-	demux := NewDemux(opts.SrcID, opts.SrcName, mirror, conn, m)
+	demux := NewDemux(opts.SrcID, opts.SrcName, mirror, conn, m, keylog)
 	return demux.Run(sessCtx, conn)
 }
 

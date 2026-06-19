@@ -21,6 +21,7 @@ type ServeOptions struct {
 	SrcName         string
 	Resume          uint64 // next gpidx the collector needs (half-open)
 	Compress        bool   // zstd-compress PKT_BATCH payloads on the link
+	KeylogFile      string // NSS keylog file to relay as TLS_KEYLOG frames ("" disables)
 	BatchMaxPackets int
 	BatchMaxBytes   int
 	PollInterval    time.Duration
@@ -72,6 +73,8 @@ func RunServe(ctx context.Context, opts ServeOptions) error {
 
 	out := bufio.NewWriterSize(opts.Out, 256<<10)
 	s := &streamer{out: out, srcID: opts.SrcID, seq: map[proto.FrameType]uint64{}, compress: opts.Compress}
+	keylog := newKeylogTailer(opts.KeylogFile)
+	defer keylog.Close()
 
 	compression := proto.CompressionNone
 	if opts.Compress {
@@ -114,6 +117,9 @@ func RunServe(ctx context.Context, opts ServeOptions) error {
 	}
 
 	beat := func() error {
+		if err := keylog.emitNew(s); err != nil {
+			return err
+		}
 		if err := out.Flush(); err != nil {
 			return err
 		}
@@ -256,6 +262,17 @@ func (s *streamer) sendHeartbeat(head uint64) error {
 		SourceID: s.srcID,
 		Seq:      s.next(proto.FrameHeartbeat),
 		Payload:  proto.Heartbeat{TsNsec: uint64(time.Now().UnixNano()), HeadGpidx: head}.Encode(),
+	}
+	_, err := f.WriteTo(s.out)
+	return err
+}
+
+func (s *streamer) sendKeylog(line []byte) error {
+	f := proto.Frame{
+		Type:     proto.FrameTLSKeylog,
+		SourceID: s.srcID,
+		Seq:      s.next(proto.FrameTLSKeylog),
+		Payload:  line,
 	}
 	_, err := f.WriteTo(s.out)
 	return err

@@ -20,7 +20,8 @@ type ListenOptions struct {
 	SrcID        uint16
 	SrcName      string
 	ListenAddr   string
-	Compress     bool // zstd-compress PKT_BATCH payloads on the link
+	Compress     bool   // zstd-compress PKT_BATCH payloads on the link
+	KeylogFile   string // NSS keylog file (from eCapture) to relay as TLS_KEYLOG
 	Key          transport.Keypair
 	AllowedPeers [][]byte // allowlisted collector static public keys
 }
@@ -87,13 +88,14 @@ func serveConn(ctx context.Context, raw net.Conn, opts ListenOptions) {
 	}
 
 	if err := RunServe(ctx, ServeOptions{
-		SpoolDir: opts.SpoolDir,
-		SrcID:    opts.SrcID,
-		SrcName:  opts.SrcName,
-		Resume:   ack.AckedGpidx,
-		Compress: opts.Compress,
-		In:       conn,
-		Out:      conn,
+		SpoolDir:   opts.SpoolDir,
+		SrcID:      opts.SrcID,
+		SrcName:    opts.SrcName,
+		Resume:     ack.AckedGpidx,
+		Compress:   opts.Compress,
+		KeylogFile: opts.KeylogFile,
+		In:         conn,
+		Out:        conn,
 	}); err != nil {
 		log.Printf("listen: serve ended: %v", err)
 	}
