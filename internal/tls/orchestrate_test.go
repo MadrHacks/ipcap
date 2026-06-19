@@ -2,6 +2,7 @@ package tls
 
 import (
 	"context"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"strings"
@@ -9,6 +10,13 @@ import (
 	"testing"
 	"time"
 )
+
+// keyLineFor builds a well-formed NSS keylog line whose secret hex-encodes the
+// container, so a test can assert which target's key was relayed while the line
+// still passes keylog validation.
+func keyLineFor(container string) string {
+	return "CLIENT_RANDOM " + strings.Repeat("a", 64) + " " + hex.EncodeToString([]byte(container))
+}
 
 func TestEcaptureArgs(t *testing.T) {
 	cases := []struct {
@@ -82,7 +90,7 @@ func (h *mockHooker) Start(ctx context.Context, t Target, keylogFile string) err
 	h.starts[t.Key]++
 	h.active[t.Key] = true
 	h.mu.Unlock()
-	_ = os.WriteFile(keylogFile, []byte("CLIENT_RANDOM "+t.Container+"\n"), 0o644)
+	_ = os.WriteFile(keylogFile, []byte(keyLineFor(t.Container)+"\n"), 0o644)
 	<-ctx.Done()
 	h.mu.Lock()
 	h.active[t.Key] = false
@@ -150,7 +158,7 @@ func TestReconcileLifecycle(t *testing.T) {
 	waitFor(t, "both hooks active", func() bool { return mh.isActive("svc-a") && mh.isActive("svc-b") })
 	waitFor(t, "both keys relayed", func() bool {
 		b, _ := os.ReadFile(relay)
-		return strings.Contains(string(b), "svc-a") && strings.Contains(string(b), "svc-b")
+		return strings.Contains(string(b), keyLineFor("svc-a")) && strings.Contains(string(b), keyLineFor("svc-b"))
 	})
 
 	// Live edit: drop svc-b. Only its hook must stop.
@@ -162,7 +170,7 @@ func TestReconcileLifecycle(t *testing.T) {
 
 	// Dedup: the relay file must have each key exactly once despite re-merging.
 	b, _ := os.ReadFile(relay)
-	if n := strings.Count(string(b), "CLIENT_RANDOM svc-a"); n != 1 {
+	if n := strings.Count(string(b), keyLineFor("svc-a")); n != 1 {
 		t.Fatalf("svc-a appears %d times in relay, want 1 (dedup)", n)
 	}
 }

@@ -62,17 +62,18 @@ func TestKeylogTailerSingleFile(t *testing.T) {
 func TestKeylogTailerDirectoryManualDropIn(t *testing.T) {
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "ecapture.log"), []byte("CLIENT_RANDOM e1 1\n"), 0o644)
-	os.WriteFile(filepath.Join(dir, "manual-mitmproxy.log"), []byte("CLIENT_RANDOM m1 2\nCLIENT_RANDOM m2 3\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "manual-mitmproxy.log"), []byte("CLIENT_RANDOM a1 2\nCLIENT_RANDOM a2 3\n"), 0o644)
 	// A subdirectory (the orchestrator's internal per-target outputs) must NOT be
-	// descended into, so those keys are not double-relayed.
+	// descended into, so those keys are not double-relayed. The line is itself a
+	// valid keylog line, so the test proves exclusion (not mere rejection).
 	os.MkdirAll(filepath.Join(dir, "targets"), 0o755)
-	os.WriteFile(filepath.Join(dir, "targets", "x.log"), []byte("CLIENT_RANDOM should-not-appear 9\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "targets", "x.log"), []byte("CLIENT_RANDOM deadbeef 9\n"), 0o644)
 
 	k := newKeylogTailer(dir)
 	defer k.Close()
 
 	got := drainKeylog(t, k)
-	want := map[string]bool{"CLIENT_RANDOM e1 1": true, "CLIENT_RANDOM m1 2": true, "CLIENT_RANDOM m2 3": true}
+	want := map[string]bool{"CLIENT_RANDOM e1 1": true, "CLIENT_RANDOM a1 2": true, "CLIENT_RANDOM a2 3": true}
 	if len(got) != 3 {
 		t.Fatalf("first tick relayed %d lines, want 3: %v", len(got), got)
 	}
@@ -83,8 +84,8 @@ func TestKeylogTailerDirectoryManualDropIn(t *testing.T) {
 	}
 
 	// Operator drops a new keylog file mid-connection -> picked up next tick.
-	os.WriteFile(filepath.Join(dir, "manual-mitmproxy2.log"), []byte("CLIENT_RANDOM m3 4\n"), 0o644)
-	if got := drainKeylog(t, k); len(got) != 1 || got[0] != "CLIENT_RANDOM m3 4" {
+	os.WriteFile(filepath.Join(dir, "manual-mitmproxy2.log"), []byte("CLIENT_RANDOM a3 4\n"), 0o644)
+	if got := drainKeylog(t, k); len(got) != 1 || got[0] != "CLIENT_RANDOM a3 4" {
 		t.Fatalf("drop-in tick = %v", got)
 	}
 }

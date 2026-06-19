@@ -1,12 +1,16 @@
 package tls
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
+
+	"ipcap/internal/keylog"
 )
 
 // Reconciler keeps the set of running eCapture hooks in sync with the desired
@@ -139,6 +143,7 @@ func (r *Reconciler) mergeLoop(ctx context.Context) {
 		return
 	}
 	defer out.Close()
+	states := map[string]*mergeState{}
 	t := time.NewTicker(2 * time.Second)
 	defer t.Stop()
 	for {
@@ -146,43 +151,111 @@ func (r *Reconciler) mergeLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case <-t.C:
-			r.mergeOnce(out, seen)
+			r.mergeOnce(out, seen, states)
 		}
 	}
 }
 
-func (r *Reconciler) mergeOnce(out *os.File, seen map[string]struct{}) {
+// mergeState tracks, per per-target keylog file, how far it has been relayed and
+// whether we are mid-skip through an oversized (garbage) line that spans reads.
+type mergeState struct {
+	off      int64
+	skipping bool
+}
+
+func (r *Reconciler) mergeOnce(out *os.File, seen map[string]struct{}, states map[string]*mergeState) {
 	files, _ := filepath.Glob(filepath.Join(r.KeylogDir, "*.log"))
 	for _, fp := range files {
-		b, err := os.ReadFile(fp)
+		st := states[fp]
+		if st == nil {
+			st = &mergeState{}
+			states[fp] = st
+		}
+		f, err := os.Open(fp)
 		if err != nil {
 			continue
 		}
-		for _, line := range strings.Split(string(b), "\n") {
-			line = strings.TrimSpace(line)
-			if line == "" {
-				continue
-			}
-			if _, ok := seen[line]; ok {
-				continue
-			}
-			seen[line] = struct{}{}
-			if _, err := out.WriteString(line + "\n"); err != nil {
-				return
-			}
-		}
+		mergeTail(f, st, out, seen)
+		f.Close()
 	}
 }
 
+// mergeTail relays complete, valid keylog lines appended to f since st.off,
+// writing each unseen one to out. It reads in bounded chunks and never buffers
+// more than one capped line, so a runaway per-target file — e.g. a
+// never-terminating zero-padded line from a buggy eCapture build — can neither
+// exhaust memory nor bloat the relay. An unterminated trailing line is left for
+// the next tick by rewinding st.off to its start.
+func mergeTail(f *os.File, st *mergeState, out *os.File, seen map[string]struct{}) {
+	buf := make([]byte, 64<<10)
+	var partial []byte
+	for {
+		n, rerr := f.ReadAt(buf, st.off)
+		chunk := buf[:n]
+		for len(chunk) > 0 {
+			i := bytes.IndexByte(chunk, '\n')
+			if i < 0 { // no newline in this chunk
+				st.off += int64(len(chunk))
+				if !st.skipping {
+					partial = append(partial, chunk...)
+					if len(partial) > keylog.MaxLineLen {
+						partial = partial[:0] // oversized: drop and skip to next '\n'
+						st.skipping = true
+					}
+				}
+				break
+			}
+			st.off += int64(i + 1)
+			if st.skipping {
+				st.skipping = false // this newline ends the garbage line
+			} else {
+				line := append(partial, chunk[:i]...)
+				if keylog.Valid(line) {
+					key := string(bytes.TrimSpace(line))
+					if _, ok := seen[key]; !ok {
+						seen[key] = struct{}{}
+						if _, werr := out.WriteString(key + "\n"); werr != nil {
+							return
+						}
+					}
+				}
+				partial = partial[:0]
+			}
+			chunk = chunk[i+1:]
+		}
+		if rerr != nil || n == 0 {
+			break
+		}
+	}
+	st.off -= int64(len(partial)) // re-read the unterminated tail next tick
+}
+
+// loadSeen primes the dedupe set from the VALID lines already in the relay file,
+// streaming and skipping over-long lines so a previously-bloated relay can never
+// exhaust memory.
 func loadSeen(path string) map[string]struct{} {
 	seen := map[string]struct{}{}
-	b, err := os.ReadFile(path)
+	f, err := os.Open(path)
 	if err != nil {
 		return seen
 	}
-	for _, line := range strings.Split(string(b), "\n") {
-		if line = strings.TrimSpace(line); line != "" {
-			seen[line] = struct{}{}
+	defer f.Close()
+	br := bufio.NewReader(f)
+	for {
+		line, rerr := br.ReadSlice('\n')
+		if keylog.Valid(line) {
+			seen[string(bytes.TrimSpace(line))] = struct{}{}
+		}
+		if rerr != nil {
+			if rerr == bufio.ErrBufferFull {
+				for {
+					if _, e := br.ReadSlice('\n'); e != bufio.ErrBufferFull {
+						break
+					}
+				}
+				continue
+			}
+			break
 		}
 	}
 	return seen

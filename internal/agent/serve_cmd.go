@@ -8,6 +8,7 @@ import (
 	"log"
 	"time"
 
+	"ipcap/internal/keylog"
 	"ipcap/internal/pcapio"
 	"ipcap/internal/proto"
 	"ipcap/internal/spool"
@@ -273,6 +274,9 @@ func (s *streamer) sendHeartbeat(head uint64) error {
 }
 
 func (s *streamer) sendKeylog(line []byte) error {
+	if !keylog.Valid(line) {
+		return nil // never relay malformed or oversized keys (e.g. eCapture garbage)
+	}
 	f := proto.Frame{
 		Type:     proto.FrameTLSKeylog,
 		SourceID: s.srcID,
