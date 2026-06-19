@@ -21,7 +21,7 @@
 #
 # Required: ./agent.key (this vulnbox's private key) and IPCAP_COLLECTOR_PUB (the
 # collector's public key). Optional: ./tls_targets.yml (TLS override), IPCAP_IFACE
-# (capture interface, default eth0), IPCAP_KEYLOG_DIR (host keylog dir).
+# (capture interface, default game), IPCAP_KEYLOG_DIR (host keylog dir).
 services:
   ipcap-capture:
     image: ghcr.io/madrhacks/ipcap-agent:${IPCAP_IMAGE_TAG:-latest}
@@ -36,7 +36,7 @@ services:
     command:
       - agent
       - capture
-      - --iface=${IPCAP_IFACE:-eth0}
+      - --iface=${IPCAP_IFACE:-game}
       - --spool-dir=/spool
       - --src-id=1
       - --exclude-port=7878

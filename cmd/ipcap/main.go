@@ -107,7 +107,7 @@ func agentCaptureCmd() *cobra.Command {
 	f := cmd.Flags()
 	f.StringVar(&opts.SpoolDir, "spool-dir", "/var/lib/ipcap/spool", "durable spool directory")
 	f.Uint16Var(&opts.SrcID, "src-id", 1, "source id")
-	f.StringVar(&opts.Iface, "iface", "", "capture interface (AF_PACKET)")
+	f.StringVar(&opts.Iface, "iface", "game", "capture interface (AF_PACKET)")
 	f.StringVar(&opts.PcapFile, "pcap-file", "", "replay a pcap file instead of live capture")
 	f.IntVar(&opts.Snaplen, "snaplen", 65536, "capture snap length")
 	f.IntVar(&opts.RingMiB, "ring-mib", 256, "AF_PACKET ring size (MiB)")
