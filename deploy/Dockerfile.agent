@@ -1,0 +1,33 @@
+# Vulnbox agent image: the ipcap binary + the eCapture binary baked in, so the
+# whole agent (capture + listen + tls) deploys as a compose stack with nothing
+# to install on the host. Multi-arch via the BuildKit TARGETARCH arg.
+FROM golang:1.24-alpine AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+ARG VERSION=dev
+RUN CGO_ENABLED=0 go build -trimpath \
+    -ldflags "-X main.version=${VERSION} -s -w" \
+    -o /ipcap ./cmd/ipcap
+
+# Pull the pinned eCapture release matching MadrHacks/ecapture (it tracks
+# upstream; bump ECAPTURE_VERSION when the fork diverges and ships its own
+# release).
+FROM alpine:3.20 AS ecapture
+ARG ECAPTURE_VERSION=2.4.0
+ARG TARGETARCH
+RUN apk add --no-cache curl tar && \
+    curl -fsSL "https://github.com/gojue/ecapture/releases/download/v${ECAPTURE_VERSION}/ecapture-v${ECAPTURE_VERSION}-linux-${TARGETARCH}.tar.gz" \
+      -o /tmp/ecapture.tgz && \
+    mkdir -p /tmp/e && tar xzf /tmp/ecapture.tgz -C /tmp/e --strip-components=1 && \
+    install -m0755 /tmp/e/ecapture /ecapture
+
+# glibc base: eCapture's release binary is not musl-static, so we cannot use
+# alpine for the runtime. ipcap is CGO-free and runs anywhere.
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+COPY --from=build /ipcap /usr/local/bin/ipcap
+COPY --from=ecapture /ecapture /usr/local/bin/ecapture
+ENTRYPOINT ["/usr/local/bin/ipcap"]

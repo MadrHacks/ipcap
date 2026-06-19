@@ -1,0 +1,84 @@
+# ipcap agent — runs ON THE VULNBOX as a compose stack (replaces the systemd
+# units). Three single-purpose services share one image (ipcap + eCapture baked
+# in) and the spool/keylog volumes. They are host-privileged by necessity:
+# capture needs the host NIC, the listener binds the host drain port, and the TLS
+# hooker needs host eBPF + host pid visibility to reach every vulnservice's libssl
+# — none of which reduces isolation (the agent is root-level either way).
+#
+# Required: ./agent.key (this vulnbox's private key) and IPCAP_COLLECTOR_PUB (the
+# collector's public key). Optional: ./tls_targets.yml (TLS override) and
+# IPCAP_IFACE (capture interface, default eth0).
+services:
+  ipcap-capture:
+    image: ghcr.io/madrhacks/ipcap-agent:${IPCAP_IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    restart: unless-stopped
+    network_mode: host
+    cap_add:
+      - NET_RAW
+      - NET_ADMIN
+    command:
+      - agent
+      - capture
+      - --iface=${IPCAP_IFACE:-eth0}
+      - --spool-dir=/spool
+      - --src-id=1
+      - --exclude-port=7878
+      - --ring-mib=256
+    volumes:
+      - ipcap-spool:/spool
+
+  ipcap-listen:
+    image: ghcr.io/madrhacks/ipcap-agent:${IPCAP_IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    restart: unless-stopped
+    network_mode: host
+    command:
+      - agent
+      - listen
+      - --spool-dir=/spool
+      - --src-id=1
+      - --listen=:7878
+      - --key=/keys/agent.key
+      - --peer=${IPCAP_COLLECTOR_PUB:?set IPCAP_COLLECTOR_PUB to the collector public key}
+      - --keylog-file=/keylog/ssl_keys.log
+    volumes:
+      - ipcap-spool:/spool
+      - ./agent.key:/keys/agent.key:ro
+      - ipcap-keylog:/keylog
+    depends_on:
+      - ipcap-capture
+
+  # TLS keylog: auto-hooks vulnservice containers with eCapture. Privileged +
+  # pid:host so eBPF uprobes reach every container's libssl; an eBPF fault here is
+  # isolated to this container and never touches capture or a vulnservice.
+  ipcap-tls:
+    image: ghcr.io/madrhacks/ipcap-agent:${IPCAP_IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile.agent
+    restart: unless-stopped
+    privileged: true
+    pid: host
+    command:
+      - agent
+      - tls
+      - --ecapture-bin=/usr/local/bin/ecapture
+      - --keylog-file=/keylog/ssl_keys.log
+      - --keylog-dir=/keylog/targets
+      - --config=/config/tls_targets.yml
+      - --interval=10s
+    volumes:
+      - ipcap-keylog:/keylog
+      - ./tls_targets.yml:/config/tls_targets.yml:ro
+      - /sys:/sys:ro
+    depends_on:
+      - ipcap-listen
+
+volumes:
+  ipcap-spool:
+  ipcap-keylog:
