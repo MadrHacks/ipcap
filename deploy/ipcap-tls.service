@@ -1,0 +1,25 @@
+[Unit]
+Description=ipcap TLS keylog orchestrator (eCapture auto-hook)
+Documentation=https://github.com/MadrHacks/ipcap
+After=network-online.target ipcap-capture.service
+Wants=network-online.target
+
+[Service]
+# Auto-discovers TLS containers and drives eCapture per container; writes a
+# merged keylog the listener relays as TLS_KEYLOG. eBPF needs broad privilege;
+# this runs separate from capture so an eBPF fault never touches packet capture.
+ExecStart=/usr/local/bin/ipcap agent tls \
+    --ecapture-bin /usr/local/bin/ecapture \
+    --keylog-file /var/lib/ipcap/ssl_keys.log \
+    --keylog-dir /var/lib/ipcap/keylogs \
+    --config /etc/ipcap/tls_targets.yml \
+    --interval 10s
+Restart=always
+RestartSec=5
+StartLimitIntervalSec=0
+# eCapture (spawned children) needs eBPF + uprobe privileges.
+AmbientCapabilities=CAP_BPF CAP_PERFMON CAP_NET_ADMIN CAP_SYS_ADMIN CAP_SYS_PTRACE
+# Pair with: ipcap agent listen --keylog-file /var/lib/ipcap/ssl_keys.log
+
+[Install]
+WantedBy=multi-user.target

@@ -1,55 +1,71 @@
-# TLS decryption keys (eCapture → ipcap → SSLKEYLOGFILE)
+# TLS decryption keys (auto-hooked eCapture → ipcap → SSLKEYLOGFILE)
 
-ipcap can carry TLS session keys alongside the packets so a TLS-aware tulip pass
-can decrypt captured traffic. The pipeline is:
+ipcap carries TLS session keys alongside the packets so a TLS-aware tulip pass
+can decrypt captured traffic. `ipcap agent tls` is the orchestrator: it
+auto-discovers TLS-using docker containers, targets the right crypto library per
+container, drives eCapture (isolated subprocess) to extract NSS keylog, survives
+container restarts, and accepts a live operator override when auto-detection is
+wrong.
 
 ```
-eCapture (uprobes on libssl)  ->  NSS keylog file
-        │ (writes CLIENT_RANDOM ... lines)
-        ▼
-ipcap agent listen --keylog-file <file>   (relays each line as a TLS_KEYLOG frame)
-        │ (over the existing Noise link, alongside packets)
-        ▼
-ipcap collector --sslkeylog-file <file>   (dedupes, appends to an SSLKEYLOGFILE)
-        │
-        ▼
-future tulip TLS pass: pcap + SSLKEYLOGFILE -> plaintext
+ipcap agent tls   ── discovers containers, drives one eCapture per (container,library) ──┐
+   │  reconciles every --interval (picks up restarts + live --config edits)              │
+   ▼                                                                                      ▼
+ per-target keylog files  ──(deduped merge)──►  --keylog-file (relay)            eCapture (eBPF uprobes)
+                                                      │
+ipcap agent listen --keylog-file <same>  ──(TLS_KEYLOG frames over Noise)──►  ipcap collector --sslkeylog-file
+                                                                                      │
+                                                                          SSLKEYLOGFILE → future tulip TLS pass
 ```
 
-The keys ride the same Noise connection as the packets (TLS_KEYLOG, frame type
-0xA0, high-bit *skippable* so a key-unaware collector ignores them). They carry
-no resume state: the agent re-sends every key on each reconnect and the collector
-dedupes, so a dropped key only costs decryptability of that one flow — it never
-affects packet capture. **Capture and keys are independent; nothing here can
-disrupt the vulnservices.**
+The keys are completely independent of packet capture (separate process, separate
+eBPF, separate frame type 0xA0 — high-bit *skippable*). A missing or failed hook
+only costs decryptability of that one flow; it can never disrupt capture or a
+vulnservice.
 
-## Running eCapture on the vulnbox
+## How it works
 
-eCapture (https://github.com/MadrHacks/ecapture) hooks libssl via eBPF uprobes —
-read-only kernel-side breakpoints that do **not** modify or pause the target
-process. The keylog mode writes NSS keylog lines:
+- **Discovery** scans `/proc/*/cgroup` + `/proc/*/maps`: any process in a docker
+  cgroup that maps `libssl`/`libcrypto` (OpenSSL/BoringSSL) or `libgnutls`
+  (GnuTLS) becomes a target, deduplicated to one hook per (container, library).
+  The library is taken at its host-visible path (`/proc/<pid>/root/...`) and the
+  hook is scoped to the container via eCapture's `--cgroup_path`.
+- **Targeting** picks the eCapture probe per library: `tls`/`--libssl` (OpenSSL),
+  `gnutls`/`--gnutls`, `gotls`/`--elfpath`.
+- **Reconcile** runs every `--interval`: starts hooks for new containers, stops
+  hooks for gone ones, restarts a crashed eCapture with backoff. Container
+  restarts (new pid/cgroup) are picked up automatically.
+- **Override** (`--config /etc/ipcap/tls_targets.yml`, hot-reloaded) lets the
+  operator fix targeting live (see the example file): disable auto-discovery,
+  exclude a fragile service, or add a manual target (e.g. a statically-linked Go
+  service that auto-detection can't see).
+
+## Run
 
 ```sh
-# Hook every process using the system libssl and stream keys to the file ipcap relays.
-ecapture tls -m keylog -k /var/lib/ipcap/ssl_keys.log
-# Then point the agent at it:
+# Verify what WOULD be hooked first (no eBPF touched):
+ipcap agent tls --dry-run
+
+# Then, with the eCapture binary present:
+ipcap agent tls --ecapture-bin /usr/local/bin/ecapture \
+    --keylog-file /var/lib/ipcap/ssl_keys.log \
+    --config /etc/ipcap/tls_targets.yml
+# Point the listener at the same relay file:
 ipcap agent listen ... --keylog-file /var/lib/ipcap/ssl_keys.log
-# And the collector:
+# And the collector at where to write the merged SSLKEYLOGFILE:
 ipcap collector ... --sslkeylog-file /traffic/sslkeylog.txt
 ```
 
-Without `--pid`, eCapture attaches to all processes mapping the target libssl, so
-no per-service setup is needed. For vulnservices that bundle their own libssl in
-a container image, pass `--libssl=<path-inside-the-merged-rootfs>` (the host sees
-container libraries under the container's overlay mount); run one eCapture per
-distinct libssl. Go-TLS services need `ecapture gotls` instead (uprobe on the Go
-runtime; requires the binary's `--elfpath`).
+`deploy/ipcap-tls.service` runs the orchestrator; install eCapture from
+https://github.com/MadrHacks/ecapture (a single static binary — its eBPF uses
+CO-RE, so the **kernel needs BTF**: `/sys/kernel/btf/vmlinux` present; most
+amd64 game boxes have it, minimal RPi kernels often don't).
 
 ## Safety
 
-eBPF uprobes are non-disruptive: if eCapture fails to attach (unsupported kernel,
-missing BTF, stripped library) it simply captures no keys — the service keeps
-running and ipcap keeps capturing packets. In doubt, **favor leaving services
-untouched over capturing every key**: start eCapture against one service, confirm
-the vulnservice is unaffected, then widen. Never co-locate eCapture with a flaky
-service mid-round.
+eBPF uprobes are non-invasive read-only breakpoints — they do not modify or pause
+the target. If eCapture can't attach (no BTF, stripped library, unsupported
+version) it just captures no keys; the service keeps running and ipcap keeps
+capturing packets. **In doubt, favor leaving a service untouched**: run
+`--dry-run`, then exclude anything fragile in `tls_targets.yml`, then widen.
+Never co-locate a new hook with a flaky service mid-round.

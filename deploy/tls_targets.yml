@@ -1,0 +1,20 @@
+# ipcap agent tls — live override config (hot-reloaded every reconcile).
+# Edit during the game to fix targeting; no restart needed.
+
+# Auto-discover TLS containers from /proc (default true). Set false to hook ONLY
+# the manual targets below.
+auto: true
+
+# Never hook these (container id prefix or label substring) — the safety valve
+# for a fragile vulnservice you don't want eBPF anywhere near.
+exclude: []
+  # - 65c211045d67
+  # - some-flaky-service
+
+# Manual targets for what auto-detection can't see (statically-linked Go
+# services, unusual library paths, BoringSSL in odd places).
+targets: []
+  # - container: my-go-service      # label, for logging
+  #   library: gotls                # openssl | gnutls | gotls
+  #   path: /proc/12345/root/app/server   # host-visible binary/library path
+  #   cgroup: /sys/fs/cgroup/system.slice/docker-<id>.scope  # optional, scopes the hook

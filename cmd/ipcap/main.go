@@ -11,11 +11,13 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/spf13/cobra"
 
 	"ipcap/internal/agent"
 	"ipcap/internal/collector"
+	"ipcap/internal/tls"
 	"ipcap/internal/transport"
 )
 
@@ -46,7 +48,48 @@ func signalContext() (context.Context, context.CancelFunc) {
 
 func agentCmd() *cobra.Command {
 	cmd := &cobra.Command{Use: "agent", Short: "Vulnbox-side capture and Noise listener"}
-	cmd.AddCommand(agentCaptureCmd(), agentListenCmd())
+	cmd.AddCommand(agentCaptureCmd(), agentListenCmd(), agentTLSCmd())
+	return cmd
+}
+
+func agentTLSCmd() *cobra.Command {
+	var (
+		keylogFile  string
+		keylogDir   string
+		configPath  string
+		ecaptureBin string
+		interval    time.Duration
+		dryRun      bool
+	)
+	cmd := &cobra.Command{
+		Use:   "tls",
+		Short: "Auto-hook TLS containers with eCapture; relay keys to the listener's --keylog-file",
+		Long: "Discovers TLS-using docker containers, targets the right crypto library per\n" +
+			"container, drives eCapture (isolated subprocess) to extract NSS keylog, and\n" +
+			"reconciles on an interval so container restarts and live --config edits are\n" +
+			"picked up. Point `agent listen --keylog-file` at the same --keylog-file.",
+		RunE: func(c *cobra.Command, _ []string) error {
+			ctx, cancel := signalContext()
+			defer cancel()
+			r := &tls.Reconciler{
+				Disco:      tls.NewDiscoverer(),
+				Hooker:     &tls.EcaptureHooker{Bin: ecaptureBin, Stderr: os.Stderr},
+				ConfigPath: configPath,
+				KeylogDir:  keylogDir,
+				RelayFile:  keylogFile,
+				Interval:   interval,
+				DryRun:     dryRun,
+			}
+			return r.Run(ctx)
+		},
+	}
+	f := cmd.Flags()
+	f.StringVar(&keylogFile, "keylog-file", "/var/lib/ipcap/ssl_keys.log", "merged relay keylog (point `agent listen --keylog-file` here)")
+	f.StringVar(&keylogDir, "keylog-dir", "/var/lib/ipcap/keylogs", "per-target eCapture keylog output directory")
+	f.StringVar(&configPath, "config", "/etc/ipcap/tls_targets.yml", "live override config (auto toggle, excludes, manual targets)")
+	f.StringVar(&ecaptureBin, "ecapture-bin", "ecapture", "path to the eCapture binary")
+	f.DurationVar(&interval, "interval", 10*time.Second, "discovery/reconcile interval")
+	f.BoolVar(&dryRun, "dry-run", false, "log intended hooks without starting eCapture (operator verification)")
 	return cmd
 }
 
