@@ -54,22 +54,30 @@ go test ./... -race
 
 ## Run
 
+Both sides deploy as docker compose stacks using the images CI publishes to
+`ghcr.io/madrhacks` (multi-arch) — nothing is installed on the host. See `deploy/`.
+
 ```sh
-# Once, per node:
-ipcap keygen --out agent.key      # on the vulnbox  -> prints AGENT_PUB
+# Once, per node — generate the static Noise keypairs:
+ipcap keygen --out agent.key      # on the vulnbox    -> prints AGENT_PUB
 ipcap keygen --out collector.key  # on the tulip host -> prints COLLECTOR_PUB
 
-# Vulnbox (deploy/ipcap-agent.service + ipcap-agent-listen.service):
-ipcap agent capture --iface eth0 --spool-dir /var/lib/ipcap/spool --ssh-port 22
-ipcap agent listen  --spool-dir /var/lib/ipcap/spool --listen :7878 \
-    --key agent.key --peer COLLECTOR_PUB
+# Vulnbox — capture + Noise listener + TLS keylog hooker, eCapture baked in
+# (deploy/docker-compose.agent.yml). Put agent.key beside the compose; the
+# collector's key + capture NIC come from the environment:
+IPCAP_COLLECTOR_PUB=COLLECTOR_PUB IPCAP_IFACE=eth0 \
+    docker compose -f deploy/docker-compose.agent.yml up -d
 
-# Tulip host (deploy/Dockerfile + compose snippet):
-ipcap collector --config-dir /config --mirror-dir /traffic --listen :4242 \
-    --key collector.key
+# Tulip host — collector drains the agent over Noise and re-serves PCAP-over-IP
+# on :4242 (deploy/docker-compose.collector.yml):
+docker compose -f deploy/docker-compose.collector.yml up -d
 
 # tulip assembler / suricata then connect to the collector's :4242 unchanged.
 ```
+
+In the MadrHacks ad-tools infra this is fully automated: autoconfig generates the
+keypairs and the ansible `setup_ipcap_agent.yml` pulls the agent stack onto the
+vulnbox, while the collector runs in the tulip compose.
 
 `vulnbox.yml` provides the dial target and pinned key: `ip`, `noise_port`
 (default 7878), and `noise_pubkey` (the agent's AGENT_PUB). `infra.yml` provides

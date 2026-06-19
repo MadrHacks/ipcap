@@ -56,10 +56,12 @@ ipcap agent listen ... --keylog-file /var/lib/ipcap/ssl_keys.log
 ipcap collector ... --sslkeylog-file /traffic/sslkeylog.txt
 ```
 
-`deploy/ipcap-tls.service` runs the orchestrator; install eCapture from
-https://github.com/MadrHacks/ecapture (a single static binary — its eBPF uses
-CO-RE, so the **kernel needs BTF**: `/sys/kernel/btf/vmlinux` present; most
-amd64 game boxes have it, minimal RPi kernels often don't).
+The `ipcap-tls` service in `deploy/docker-compose.agent.yml` runs the
+orchestrator with eCapture baked into the agent image (no host install). eCapture
+tracks https://github.com/MadrHacks/ecapture; its eBPF uses CO-RE, so the
+**kernel needs BTF** (`/sys/kernel/btf/vmlinux` present) — most amd64 game boxes
+have it, minimal RPi kernels often don't (there the hook degrades to "no keys",
+capture is unaffected).
 
 ## Safety
 
