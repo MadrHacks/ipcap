@@ -1,22 +1,27 @@
 # ipcap agent — runs ON THE VULNBOX as a compose stack (replaces the systemd
 # units). Three single-purpose services share one image (ipcap + eCapture baked
-# in) and the spool/keylog volumes. They are host-privileged by necessity:
-# capture needs the host NIC, the listener binds the host drain port, and the TLS
-# hooker needs host eBPF + host pid visibility to reach every vulnservice's libssl
-# — none of which reduces isolation (the agent is root-level either way).
+# in). They are host-privileged by necessity: capture needs the host NIC, the
+# listener binds the host drain port, and the TLS hooker needs host eBPF + host
+# pid + host cgroup visibility to reach every vulnservice's libssl — none of
+# which reduces isolation (the agent is root-level either way).
 #
-# The spool + keylog live in docker NAMED VOLUMES: they survive every container
-# restart, crash, and `compose up --build`, so on a restart/redeploy the capture
-# resumes the same gpidx space (the spool's recovery reads the existing segments
-# and continues) and the collector resumes exactly-once from its commit point —
-# no gap, no reset. The data is wiped only when the operator explicitly asks
-# (`compose down -v`). Even then it self-heals: the agent stamps the spool with
-# an epoch and the collector realigns its commit point when the epoch changes,
-# instead of stalling on a gpidx the fresh spool will never reach.
+# The spool lives in a docker NAMED VOLUME: it survives every container restart,
+# crash, and `compose up --build`, so on a restart/redeploy capture resumes the
+# same gpidx space (recovery reads the existing segments) and the collector
+# resumes exactly-once — no gap, no reset. It is wiped only by an explicit
+# `compose down -v`; even then it self-heals (the agent stamps the spool with an
+# epoch and the collector realigns its commit point when the epoch changes).
+#
+# The keylog (TLS keys) lives in a HOST BIND DIRECTORY (IPCAP_KEYLOG_DIR, default
+# /var/lib/ipcap/keylog) — unlike the spool, the operator needs to write here: a
+# MANUAL FALLBACK if eCapture can't hook a service. Drop any NSS keylog file
+# (`<dir>/manual-*.log`, from mitmproxy, an SSLKEYLOGFILE env, a custom setup, …)
+# and the listener relays it to the collector — even with the TLS hooker disabled
+# (the listener tails the directory, not just eCapture's output). See ECAPTURE.md.
 #
 # Required: ./agent.key (this vulnbox's private key) and IPCAP_COLLECTOR_PUB (the
-# collector's public key). Optional: ./tls_targets.yml (TLS override) and
-# IPCAP_IFACE (capture interface, default eth0).
+# collector's public key). Optional: ./tls_targets.yml (TLS override), IPCAP_IFACE
+# (capture interface, default eth0), IPCAP_KEYLOG_DIR (host keylog dir).
 services:
   ipcap-capture:
     image: ghcr.io/madrhacks/ipcap-agent:${IPCAP_IMAGE_TAG:-latest}
@@ -54,17 +59,21 @@ services:
       - --listen=:7878
       - --key=/keys/agent.key
       - --peer=${IPCAP_COLLECTOR_PUB:?set IPCAP_COLLECTOR_PUB to the collector public key}
-      - --keylog-file=/keylog/ssl_keys.log
+      # A DIRECTORY: relays eCapture's output AND any manual *.log dropped in here.
+      - --keylog-file=/keylog
     volumes:
       - ipcap-spool:/spool
       - ./agent.key:/keys/agent.key:ro
-      - ipcap-keylog:/keylog
+      - ${IPCAP_KEYLOG_DIR:-/var/lib/ipcap/keylog}:/keylog
     depends_on:
       - ipcap-capture
 
   # TLS keylog: auto-hooks vulnservice containers with eCapture. Privileged +
-  # pid:host so eBPF uprobes reach every container's libssl; an eBPF fault here is
-  # isolated to this container and never touches capture or a vulnservice.
+  # pid:host + cgroup:host so eBPF uprobes reach every container's libssl AND the
+  # host cgroup paths resolve correctly for per-container filtering (without
+  # cgroup:host the container's private cgroup namespace mistranslates the paths
+  # and the filter breaks). An eBPF fault here is isolated to this container and
+  # never touches capture or a vulnservice.
   ipcap-tls:
     image: ghcr.io/madrhacks/ipcap-agent:${IPCAP_IMAGE_TAG:-latest}
     build:
@@ -73,16 +82,19 @@ services:
     restart: unless-stopped
     privileged: true
     pid: host
+    cgroup: host
     command:
       - agent
       - tls
       - --ecapture-bin=/usr/local/bin/ecapture
-      - --keylog-file=/keylog/ssl_keys.log
+      # eCapture's merged output lands in the keylog dir the listener tails,
+      # alongside any manual *.log the operator drops there.
+      - --keylog-file=/keylog/ecapture.log
       - --keylog-dir=/keylog/targets
       - --config=/config/tls_targets.yml
       - --interval=10s
     volumes:
-      - ipcap-keylog:/keylog
+      - ${IPCAP_KEYLOG_DIR:-/var/lib/ipcap/keylog}:/keylog
       - ./tls_targets.yml:/config/tls_targets.yml:ro
       - /sys:/sys:ro
     depends_on:
@@ -90,4 +102,3 @@ services:
 
 volumes:
   ipcap-spool:
-  ipcap-keylog:

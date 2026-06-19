@@ -149,7 +149,7 @@ func agentListenCmd() *cobra.Command {
 	f.StringVar(&opts.SrcName, "src-name", "", "source name")
 	f.StringVar(&opts.ListenAddr, "listen", ":7878", "Noise listen address")
 	f.BoolVar(&opts.Compress, "compress", true, "zstd-compress packet batches on the link")
-	f.StringVar(&opts.KeylogFile, "keylog-file", "", "NSS keylog file (from eCapture) to relay as TLS_KEYLOG")
+	f.StringVar(&opts.KeylogFile, "keylog-file", "", "NSS keylog file OR directory of *.log files to relay as TLS_KEYLOG (a dir lets operators drop in manual keylogs)")
 	f.StringVar(&keyFile, "key", "/etc/ipcap/agent.key", "this agent's private key file (base64)")
 	f.StringSliceVar(&peerB64s, "peer", nil, "authorized collector public key (base64; repeatable)")
 	return cmd
