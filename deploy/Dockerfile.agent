@@ -1,20 +1,23 @@
 # Vulnbox agent image: the ipcap binary + the eCapture binary baked in, so the
 # whole agent (capture + listen + tls) deploys as a compose stack with nothing
 # to install on the host. Multi-arch via the BuildKit TARGETARCH arg.
-FROM golang:1.24-alpine AS build
+# Cross-compile on the native build platform (CGO-free), targeting TARGETARCH,
+# so multi-arch builds never pay for slow QEMU emulation of the Go toolchain.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-X main.version=${VERSION} -s -w" \
     -o /ipcap ./cmd/ipcap
 
 # Pull the pinned eCapture release matching MadrHacks/ecapture (it tracks
 # upstream; bump ECAPTURE_VERSION when the fork diverges and ships its own
-# release).
-FROM alpine:3.20 AS ecapture
+# release). Run on the build platform — it only fetches the TARGETARCH binary.
+FROM --platform=$BUILDPLATFORM alpine:3.20 AS ecapture
 ARG ECAPTURE_VERSION=2.4.0
 ARG TARGETARCH
 RUN apk add --no-cache curl tar && \

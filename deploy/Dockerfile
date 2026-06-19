@@ -1,12 +1,14 @@
-# Builds a single static ipcap binary (no libpcap/cgo) used for both the
-# collector container and as the artifact pushed to the vulnbox agent.
-FROM golang:1.24-alpine AS build
+# Builds a single static ipcap binary (no libpcap/cgo) for the collector image.
+# Cross-compile on the native build platform targeting TARGETARCH so multi-arch
+# CI builds never emulate the Go toolchain.
+FROM --platform=$BUILDPLATFORM golang:1.24-alpine AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 ARG VERSION=dev
-RUN CGO_ENABLED=0 go build -trimpath \
+ARG TARGETARCH
+RUN CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath \
     -ldflags "-X main.version=${VERSION} -s -w" \
     -o /ipcap ./cmd/ipcap
 
