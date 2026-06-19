@@ -137,6 +137,7 @@ func collectorCmd() *cobra.Command {
 	f.StringVar(&opts.SrcName, "src-name", "", "source name")
 	f.StringVar(&opts.ListenAddr, "listen", ":4242", "local PCAP-over-IP re-serve address")
 	f.StringVar(&opts.MetricsAddr, "metrics-addr", "", "Prometheus /metrics address (empty disables)")
+	f.IntVar(&opts.NoisePort, "noise-port", 0, "override the agent listener port (0 = vulnbox.yml); for per-source instances")
 	f.Uint32Var(&opts.Snaplen, "snaplen", 65536, "snap length")
 	f.StringVar(&keyFile, "key", "/etc/ipcap/collector.key", "this collector's private key file (base64)")
 	return cmd

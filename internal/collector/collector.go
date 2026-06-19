@@ -28,6 +28,7 @@ type Options struct {
 	SrcName     string
 	ListenAddr  string // local PCAP-over-IP re-serve, e.g. ":4242"
 	MetricsAddr string // Prometheus /metrics address, e.g. ":9100" ("" disables)
+	NoisePort   int    // override the agent listener port (0 = use vulnbox.yml); for per-source instances
 	Snaplen     uint32
 	Key         transport.Keypair // collector's own static keypair
 }
@@ -122,7 +123,11 @@ func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []by
 	sessCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	addr := net.JoinHostPort(vb.IP, strconv.Itoa(vb.Port()))
+	port := vb.Port()
+	if opts.NoisePort > 0 {
+		port = opts.NoisePort
+	}
+	addr := net.JoinHostPort(vb.IP, strconv.Itoa(port))
 	conn, err := transport.Dial(sessCtx, addr, opts.Key, agentPub)
 	if err != nil {
 		return err
