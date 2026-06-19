@@ -27,7 +27,6 @@ type Options struct {
 	SrcName    string
 	ListenAddr string // local PCAP-over-IP re-serve, e.g. ":4242"
 	Snaplen    uint32
-	BufSize    int
 	Key        transport.Keypair // collector's own static keypair
 }
 
@@ -58,8 +57,8 @@ func Run(ctx context.Context, opts Options) error {
 	}
 	defer mirror.Close()
 
-	server := pcapoverip.NewServer(mirror.Header(), opts.BufSize)
 	if opts.ListenAddr != "" {
+		server := pcapoverip.NewServer(mirror)
 		go func() {
 			if err := server.Listen(ctx, opts.ListenAddr); err != nil {
 				log.Printf("collector: listener: %v", err)
@@ -95,7 +94,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 
 		resume := mirror.Committed()
-		if err := runOnce(ctx, opts, vb, agentPub, mirror, server, resume); err != nil {
+		if err := runOnce(ctx, opts, vb, agentPub, mirror, resume); err != nil {
 			log.Printf("collector: src%d session ended: %v", opts.SrcID, err)
 		}
 		if sleepCtx(ctx, 2*time.Second) {
@@ -106,7 +105,7 @@ func Run(ctx context.Context, opts Options) error {
 
 // runOnce dials the agent, sends the resume point, and drains until the session
 // ends.
-func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []byte, mirror *Mirror, server *pcapoverip.Server, resume uint64) error {
+func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []byte, mirror *Mirror, resume uint64) error {
 	sessCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -132,7 +131,7 @@ func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []by
 		return err
 	}
 
-	demux := NewDemux(opts.SrcID, opts.SrcName, mirror, server, conn)
+	demux := NewDemux(opts.SrcID, opts.SrcName, mirror, conn)
 	return demux.Run(sessCtx, conn)
 }
 

@@ -8,18 +8,16 @@ import (
 	"time"
 
 	"ipcap/internal/pcapio"
-	"ipcap/internal/pcapoverip"
 	"ipcap/internal/proto"
 )
 
-// Demux decodes one agent connection's frame stream, dedupes by gpidx, commits
-// surviving packets to the mirror in strict order, fans them out, and feeds
-// ACKs back to the agent.
+// Demux decodes one agent connection's frame stream, dedupes by gpidx, and
+// commits surviving packets to the mirror in strict order; the PCAP-over-IP
+// fan-out tails the mirror independently. It also feeds ACKs back to the agent.
 type Demux struct {
 	srcID  uint16
 	name   string
 	mirror *Mirror
-	server *pcapoverip.Server
 	ackOut io.Writer
 
 	lastAckAt   time.Time
@@ -28,8 +26,8 @@ type Demux struct {
 }
 
 // NewDemux builds a demux for one source.
-func NewDemux(srcID uint16, name string, mirror *Mirror, server *pcapoverip.Server, ackOut io.Writer) *Demux {
-	return &Demux{srcID: srcID, name: name, mirror: mirror, server: server, ackOut: ackOut}
+func NewDemux(srcID uint16, name string, mirror *Mirror, ackOut io.Writer) *Demux {
+	return &Demux{srcID: srcID, name: name, mirror: mirror, ackOut: ackOut}
 }
 
 // Run reads the preamble then frames until the connection ends or ctx cancels.
@@ -42,7 +40,6 @@ func (d *Demux) Run(ctx context.Context, in io.Reader) error {
 	for _, s := range pre.Sources {
 		if s.ID == d.srcID {
 			gh := pcapio.GlobalHeader{Snaplen: s.Snaplen, LinkType: uint32(s.Linktype)}
-			d.server.SetHeader(gh)
 			if err := d.mirror.SetHeader(gh); err != nil {
 				return err
 			}
@@ -66,15 +63,15 @@ func (d *Demux) Run(ctx context.Context, in io.Reader) error {
 		}
 		switch f.Type {
 		case proto.FramePktBatch:
-			recs, derr := proto.DecodePktBatch(f.Payload)
-			if derr != nil {
-				return derr
+			payload := f.Payload
+			if f.Flags&proto.FlagCompressed != 0 {
+				dec, derr := proto.DecompressBatch(payload)
+				if derr != nil {
+					return derr
+				}
+				payload = dec
 			}
-			if err := d.commit(f.BaseGpidx, recs, f.Seq); err != nil {
-				return err
-			}
-		case proto.FramePkt:
-			recs, derr := proto.DecodePktBatch(append([]byte{0, 1}, f.Payload...))
+			recs, derr := proto.DecodePktBatch(payload)
 			if derr != nil {
 				return derr
 			}
@@ -126,9 +123,6 @@ func (d *Demux) commit(base uint64, recs []proto.PktRecord, seq uint64) error {
 	if err := d.mirror.Append(keep, seq); err != nil {
 		return err
 	}
-	for i := range keep {
-		d.server.Broadcast(keep[i])
-	}
 	return nil
 }
 
@@ -148,7 +142,9 @@ func (d *Demux) handleGap(payload []byte) error {
 	if err := d.mirror.NewSession(gap.ToGpidx); err != nil {
 		return err
 	}
-	d.server.ResetSession(d.mirror.Header())
+	// The fan-out detects the session change via Snapshot and recycles its
+	// clients with a fresh global header, so the gap is never a silent
+	// in-stream discontinuity for a live consumer.
 	return nil
 }
 

@@ -20,6 +20,7 @@ type ListenOptions struct {
 	SrcID        uint16
 	SrcName      string
 	ListenAddr   string
+	Compress     bool // zstd-compress PKT_BATCH payloads on the link
 	Key          transport.Keypair
 	AllowedPeers [][]byte // allowlisted collector static public keys
 }
@@ -90,6 +91,7 @@ func serveConn(ctx context.Context, raw net.Conn, opts ListenOptions) {
 		SrcID:    opts.SrcID,
 		SrcName:  opts.SrcName,
 		Resume:   ack.AckedGpidx,
+		Compress: opts.Compress,
 		In:       conn,
 		Out:      conn,
 	}); err != nil {

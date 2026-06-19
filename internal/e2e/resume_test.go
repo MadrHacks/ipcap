@@ -13,7 +13,6 @@ import (
 	"ipcap/internal/agent"
 	"ipcap/internal/collector"
 	"ipcap/internal/pcapio"
-	"ipcap/internal/pcapoverip"
 )
 
 func bigPayload(i int) []byte {
@@ -49,7 +48,7 @@ func captureBig(t *testing.T, pcapPath, spoolDir string) {
 // runConnection runs one in-process serve<->demux session over pipes, resuming
 // from `resume`, until stop() reports true or the stream ends. It returns when
 // the session is torn down.
-func runConnection(t *testing.T, spoolDir string, mirror *collector.Mirror, server *pcapoverip.Server, resume uint64, stop func() bool) {
+func runConnection(t *testing.T, spoolDir string, mirror *collector.Mirror, resume uint64, stop func() bool) {
 	t.Helper()
 	demuxIn, serveOut := io.Pipe()    // serve writes frames -> demux reads
 	serveIn, demuxAckOut := io.Pipe() // demux writes acks -> serve reads
@@ -62,7 +61,7 @@ func runConnection(t *testing.T, spoolDir string, mirror *collector.Mirror, serv
 		serveOut.Close()
 	}()
 
-	demux := collector.NewDemux(1, "resume-test", mirror, server, demuxAckOut)
+	demux := collector.NewDemux(1, "resume-test", mirror, demuxAckOut)
 	done := make(chan struct{})
 	go func() {
 		_ = demux.Run(ctx, demuxIn)
@@ -109,14 +108,13 @@ func TestResumeExactlyOnce(t *testing.T) {
 	captureBig(t, pcapPath, spoolDir)
 
 	gh := pcapio.GlobalHeader{Snaplen: 65536, LinkType: linkEthernet}
-	server := pcapoverip.NewServer(gh, 4096)
 
 	// Round 1: drain until ~25% committed, then cut.
 	mirror, err := collector.OpenMirror(mirrorDir, 1, gh)
 	if err != nil {
 		t.Fatal(err)
 	}
-	runConnection(t, spoolDir, mirror, server, mirror.Committed(), func() bool {
+	runConnection(t, spoolDir, mirror, mirror.Committed(), func() bool {
 		return mirror.Committed() >= N/4
 	})
 	cut := mirror.Committed()
@@ -140,7 +138,7 @@ func TestResumeExactlyOnce(t *testing.T) {
 	if mirror2.Committed() > 100 {
 		resume = mirror2.Committed() - 100
 	}
-	runConnection(t, spoolDir, mirror2, server, resume, func() bool {
+	runConnection(t, spoolDir, mirror2, resume, func() bool {
 		return mirror2.Committed() >= N
 	})
 	if got := mirror2.Committed(); got != N {

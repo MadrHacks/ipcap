@@ -31,23 +31,38 @@ type ResumeState struct {
 // Mirror is the durable, Wireshark-openable copy of a source's committed
 // packets on the tulip host, plus the authoritative resume point.
 type Mirror struct {
-	dir   string
-	srcID uint16
-	gh    pcapio.GlobalHeader
-	file  *os.File
-	state ResumeState // owned by the single demux goroutine
+	dir     string
+	srcID   uint16
+	gh      pcapio.GlobalHeader
+	file    *os.File
+	fileLen int64       // durable byte length of the active session file
+	state   ResumeState // owned by the single demux goroutine
 
-	// committed/sessionStart mirror state for safe concurrent reads (lag,
-	// metrics, supervisor resume) without touching the writer's state.
+	// Atomics for safe concurrent reads (supervisor resume, lag, and the
+	// PCAP-over-IP fan-out tailing the mirror) without touching writer state.
 	committed    atomic.Uint64
 	sessionStart atomic.Uint64
+	sessionSeq   atomic.Uint64
+	committedLen atomic.Int64
 }
 
 // publish copies the writer-owned commit point into the atomically-readable
-// fields after any state change.
+// fields after any durable state change.
 func (m *Mirror) publish() {
 	m.committed.Store(m.state.CommittedGpidx)
 	m.sessionStart.Store(m.state.SessionStartGpidx)
+	m.sessionSeq.Store(m.state.SessionSeq)
+	m.committedLen.Store(m.fileLen)
+}
+
+// Snapshot returns the current fan-out view: the active session, its on-disk
+// file, the durable byte length the fan-out may read up to, and the libpcap
+// header. Safe to call concurrently with the writer.
+func (m *Mirror) Snapshot() (sessionSeq uint64, file string, committedLen int64, gh pcapio.GlobalHeader) {
+	return m.sessionSeq.Load(),
+		filepath.Join(m.dir, mirrorName(m.srcID, m.sessionSeq.Load())),
+		m.committedLen.Load(),
+		m.gh
 }
 
 func mirrorName(srcID uint16, sessionSeq uint64) string {
@@ -132,11 +147,13 @@ func (m *Mirror) openSession() error {
 		f.Close()
 		return err
 	}
-	if _, err := f.Seek(0, io.SeekEnd); err != nil {
+	off, err := f.Seek(0, io.SeekEnd)
+	if err != nil {
 		f.Close()
 		return err
 	}
 	m.file = f
+	m.fileLen = off
 	return nil
 }
 
@@ -216,6 +233,7 @@ func (m *Mirror) Append(recs []pcapio.Record, lastSeq uint64) error {
 	if err := syncFile(m.file); err != nil {
 		return err
 	}
+	m.fileLen += int64(len(buf))
 	m.state.CommittedGpidx += uint64(len(recs))
 	m.state.LastSeq = lastSeq
 	if err := m.persistState(); err != nil {

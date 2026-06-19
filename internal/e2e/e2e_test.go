@@ -101,6 +101,7 @@ func TestEndToEndNoise(t *testing.T) {
 			SrcID:        1,
 			ListenAddr:   listenAddr,
 			Key:          agentKey,
+			Compress:     true,
 			AllowedPeers: [][]byte{collectorKey.Public},
 		})
 	}()
@@ -127,13 +128,19 @@ func TestEndToEndNoise(t *testing.T) {
 	verifyMirror(t, mirrorDir, N)
 }
 
-// TestFanout verifies the PCAP-over-IP re-serve delivers a live stream to a
-// connected client, byte-identical and in order.
+// TestFanout verifies the PCAP-over-IP re-serve tails the durable mirror and
+// delivers a live stream to a connected client, byte-identical and in order.
 func TestFanout(t *testing.T) {
 	const N = 300
+	dir := t.TempDir()
 	gh := pcapio.GlobalHeader{Snaplen: 65536, LinkType: linkEthernet}
-	srv := pcapoverip.NewServer(gh, 4096)
+	mirror, err := collector.OpenMirror(dir, 1, gh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mirror.Close()
 
+	srv := pcapoverip.NewServer(mirror)
 	addr := freeAddr(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -142,21 +149,21 @@ func TestFanout(t *testing.T) {
 	var conn net.Conn
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		c, err := net.Dial("tcp", addr)
-		if err == nil {
+		c, derr := net.Dial("tcp", addr)
+		if derr == nil {
 			conn = c
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("dial: %v", err)
+			t.Fatalf("dial: %v", derr)
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	defer conn.Close()
 	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
-	// Reading the global header proves the client is registered; only then
-	// broadcast, so nothing is missed.
+	// Reading the global header proves the client's cursor is set at the live
+	// head; records appended after this must all arrive, in order.
 	var ghBuf [pcapio.GlobalHeaderLen]byte
 	if _, err := io.ReadFull(conn, ghBuf[:]); err != nil {
 		t.Fatalf("read global header: %v", err)
@@ -164,9 +171,14 @@ func TestFanout(t *testing.T) {
 	if _, err := pcapio.ParseGlobalHeader(ghBuf[:]); err != nil {
 		t.Fatalf("bad global header: %v", err)
 	}
-	for i := 0; i < N; i++ {
+
+	recs := make([]pcapio.Record, N)
+	for i := range recs {
 		p := payload(i)
-		srv.Broadcast(pcapio.Record{TsSec: uint32(i), OrigLen: uint32(len(p)), Data: p})
+		recs[i] = pcapio.Record{TsSec: uint32(i), OrigLen: uint32(len(p)), Data: p}
+	}
+	if err := mirror.Append(recs, 0); err != nil {
+		t.Fatal(err)
 	}
 	for i := 0; i < N; i++ {
 		rec, err := pcapio.ReadRecord(conn, 65536)

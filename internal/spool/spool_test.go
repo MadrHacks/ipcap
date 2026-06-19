@@ -208,6 +208,45 @@ func TestRecoveryReseatsTornManifestLine(t *testing.T) {
 	}
 }
 
+// TestJanitorSkipsLockedSegment asserts the reaper will not delete a segment a
+// reader is actively replaying (shared-lock held), so bytes are never yanked
+// from under an in-flight serve.
+func TestJanitorSkipsLockedSegment(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWriter(Config{Dir: dir, SrcID: 5, Snaplen: 65536, LinkType: 1, RotateBytes: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeN(t, w, 2000)
+	w.Close()
+
+	// Reader positioned in the oldest segment holds a shared lock on it.
+	r, _, _, err := OpenReader(dir, 5, 65536, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if _, _, err := r.Next(); err != nil { // opens + shared-locks the oldest segment
+		t.Fatal(err)
+	}
+	oldestFile := filepath.Join(dir, segmentName(5, 0))
+	if _, err := os.Stat(oldestFile); err != nil {
+		t.Fatalf("oldest segment should exist: %v", err)
+	}
+
+	w2, err := NewWriter(Config{Dir: dir, SrcID: 5, Snaplen: 65536, LinkType: 1, RotateBytes: 2048})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer w2.Close()
+	if _, err := w2.Reap(2048); err != nil { // aggressive cap; would reap oldest first
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(oldestFile); err != nil {
+		t.Fatalf("locked oldest segment must NOT be reaped: %v", err)
+	}
+}
+
 func TestResumeOlderThanRetentionReaps(t *testing.T) {
 	dir := t.TempDir()
 	w, err := NewWriter(Config{Dir: dir, SrcID: 3, Snaplen: 65536, LinkType: 1, RotateBytes: 2048})

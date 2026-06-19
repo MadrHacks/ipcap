@@ -20,6 +20,7 @@ type ServeOptions struct {
 	SrcID           uint16
 	SrcName         string
 	Resume          uint64 // next gpidx the collector needs (half-open)
+	Compress        bool   // zstd-compress PKT_BATCH payloads on the link
 	BatchMaxPackets int
 	BatchMaxBytes   int
 	PollInterval    time.Duration
@@ -69,10 +70,14 @@ func RunServe(ctx context.Context, opts ServeOptions) error {
 	defer r.Close()
 
 	out := bufio.NewWriterSize(opts.Out, 256<<10)
-	s := &streamer{out: out, srcID: opts.SrcID, seq: map[proto.FrameType]uint64{}}
+	s := &streamer{out: out, srcID: opts.SrcID, seq: map[proto.FrameType]uint64{}, compress: opts.Compress}
 
+	compression := proto.CompressionNone
+	if opts.Compress {
+		compression = proto.CompressionZstd
+	}
 	if err := proto.WritePreamble(out, proto.PreambleHeader{
-		Compression: proto.CompressionNone,
+		Compression: compression,
 		Sources: []proto.SrcInfo{{
 			ID:       opts.SrcID,
 			Name:     opts.SrcName,
@@ -214,9 +219,10 @@ func pcapToProto(rec pcapio.Record) proto.PktRecord {
 
 // streamer frames and writes to the collector, tracking per-type sequence.
 type streamer struct {
-	out   io.Writer
-	srcID uint16
-	seq   map[proto.FrameType]uint64
+	out      io.Writer
+	srcID    uint16
+	seq      map[proto.FrameType]uint64
+	compress bool
 }
 
 func (s *streamer) next(t proto.FrameType) uint64 {
@@ -226,12 +232,19 @@ func (s *streamer) next(t proto.FrameType) uint64 {
 }
 
 func (s *streamer) sendBatch(baseGpidx uint64, recs []proto.PktRecord) error {
+	payload := proto.EncodePktBatch(recs)
+	var flags proto.Flags
+	if s.compress {
+		payload = proto.CompressBatch(payload)
+		flags |= proto.FlagCompressed
+	}
 	f := proto.Frame{
 		Type:      proto.FramePktBatch,
+		Flags:     flags,
 		SourceID:  s.srcID,
 		BaseGpidx: baseGpidx,
 		Seq:       s.next(proto.FramePktBatch),
-		Payload:   proto.EncodePktBatch(recs),
+		Payload:   payload,
 	}
 	_, err := f.WriteTo(s.out)
 	return err

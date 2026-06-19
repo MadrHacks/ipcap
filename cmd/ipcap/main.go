@@ -105,6 +105,7 @@ func agentListenCmd() *cobra.Command {
 	f.Uint16Var(&opts.SrcID, "src-id", 1, "source id")
 	f.StringVar(&opts.SrcName, "src-name", "", "source name")
 	f.StringVar(&opts.ListenAddr, "listen", ":7878", "Noise listen address")
+	f.BoolVar(&opts.Compress, "compress", true, "zstd-compress packet batches on the link")
 	f.StringVar(&keyFile, "key", "/etc/ipcap/agent.key", "this agent's private key file (base64)")
 	f.StringSliceVar(&peerB64s, "peer", nil, "authorized collector public key (base64; repeatable)")
 	return cmd
@@ -136,7 +137,6 @@ func collectorCmd() *cobra.Command {
 	f.StringVar(&opts.SrcName, "src-name", "", "source name")
 	f.StringVar(&opts.ListenAddr, "listen", ":4242", "local PCAP-over-IP re-serve address")
 	f.Uint32Var(&opts.Snaplen, "snaplen", 65536, "snap length")
-	f.IntVar(&opts.BufSize, "buf-size", 1<<16, "per-client fan-out buffer (records)")
 	f.StringVar(&keyFile, "key", "/etc/ipcap/collector.key", "this collector's private key file (base64)")
 	return cmd
 }

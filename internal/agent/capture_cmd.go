@@ -128,6 +128,7 @@ func maintenanceLoop(ctx context.Context, stop <-chan struct{}, w *spool.Writer,
 	defer ticker.Stop()
 	reapEvery := time.NewTicker(2 * time.Second)
 	defer reapEvery.Stop()
+	var lastFullWarn time.Time
 	for {
 		select {
 		case <-ctx.Done():
@@ -140,6 +141,13 @@ func maintenanceLoop(ctx context.Context, stop <-chan struct{}, w *spool.Writer,
 			}
 		case <-reapEvery.C:
 			if retentionBytes > 0 {
+				// Alert at 70% full, BEFORE retention starts dropping data, so
+				// the operator can react before a forced GAP.
+				if bytes := w.SpoolBytes(); bytes*10 >= retentionBytes*7 && time.Since(lastFullWarn) > 30*time.Second {
+					log.Printf("capture: WARNING spool %d/%d bytes (%.0f%%) — approaching retention cap",
+						bytes, retentionBytes, float64(bytes)*100/float64(retentionBytes))
+					lastFullWarn = time.Now()
+				}
 				if n, err := w.Reap(retentionBytes); err != nil {
 					log.Printf("capture: reap: %v", err)
 				} else if n > 0 {
