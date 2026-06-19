@@ -30,9 +30,10 @@ Restart=always
 RestartSec=1
 StartLimitIntervalSec=0
 StateDirectory=ipcap
-# Milestone 3 will switch to Type=notify with WatchdogSec=30 driven by capture
-# progress; until then a plain always-restart unit suffices.
-Type=simple
+# notify + watchdog: the capture loop pings the watchdog, so a silently-wedged
+# capture (process alive, loop stalled) is detected and restarted within 30s.
+Type=notify
+WatchdogSec=30
 
 [Install]
 WantedBy=multi-user.target

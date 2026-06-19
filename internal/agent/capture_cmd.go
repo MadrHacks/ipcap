@@ -11,7 +11,9 @@ import (
 
 	"ipcap/internal/capture"
 	"ipcap/internal/pcapio"
+	"ipcap/internal/proto"
 	"ipcap/internal/spool"
+	"ipcap/internal/systemd"
 )
 
 // CaptureOptions configures the persistent capture process.
@@ -77,7 +79,15 @@ func RunCapture(ctx context.Context, opts CaptureOptions) error {
 	// arrival so idle periods still bound un-synced data and disk use.
 	stop := make(chan struct{})
 	defer close(stop)
-	go maintenanceLoop(ctx, stop, w, opts.RetentionBytes)
+	go maintenanceLoop(ctx, stop, w, src, opts.SpoolDir, opts.RetentionBytes)
+
+	// systemd watchdog: pinged ONLY from the capture loop, so a silently-wedged
+	// capture (process alive, loop stalled) is detected and restarted.
+	sd := systemd.New()
+	sd.Ready()
+	sd.Status("capturing")
+	wdInterval := systemd.WatchdogInterval()
+	var lastPing time.Time
 
 	// The read loop owns the source exclusively: the live source's poll timeout
 	// surfaces as ErrTimeout, an idle tick where the loop observes cancellation
@@ -87,6 +97,10 @@ func RunCapture(ctx context.Context, opts CaptureOptions) error {
 		case <-ctx.Done():
 			return nil
 		default:
+		}
+		if wdInterval > 0 && time.Since(lastPing) >= wdInterval {
+			sd.Watchdog()
+			lastPing = time.Now()
 		}
 		ts, data, origLen, err := src.ReadPacket()
 		if err != nil {
@@ -123,7 +137,23 @@ func RunCapture(ctx context.Context, opts CaptureOptions) error {
 	}
 }
 
-func maintenanceLoop(ctx context.Context, stop <-chan struct{}, w *spool.Writer, retentionBytes int64) {
+// publishStats writes the capture counters for the serve process to relay.
+func publishStats(w *spool.Writer, src capture.Source, spoolDir string) {
+	st, err := src.Stats()
+	if err != nil {
+		return
+	}
+	_ = writeStats(spoolDir, proto.Stats{
+		Captured:    st.Received,
+		DroppedKern: st.DroppedKernel,
+		IfDrop:      st.DroppedIface,
+		SpoolBytes:  uint64(w.SpoolBytes()),
+		HeadGpidx:   w.Head(),
+		OldestGpidx: w.OldestGpidx(),
+	})
+}
+
+func maintenanceLoop(ctx context.Context, stop <-chan struct{}, w *spool.Writer, src capture.Source, spoolDir string, retentionBytes int64) {
 	ticker := time.NewTicker(200 * time.Millisecond)
 	defer ticker.Stop()
 	reapEvery := time.NewTicker(2 * time.Second)
@@ -140,6 +170,7 @@ func maintenanceLoop(ctx context.Context, stop <-chan struct{}, w *spool.Writer,
 				log.Printf("capture: tick: %v", err)
 			}
 		case <-reapEvery.C:
+			publishStats(w, src, spoolDir)
 			if retentionBytes > 0 {
 				// Alert at 70% full, BEFORE retention starts dropping data, so
 				// the operator can react before a forced GAP.

@@ -43,7 +43,7 @@ func TestDemuxDedupMidBatch(t *testing.T) {
 	}
 
 	// Batch base=30 covering gpidx 30..69: 30..49 are duplicates, 50..69 new.
-	d := NewDemux(1, "t", mirror, io.Discard)
+	d := NewDemux(1, "t", mirror, io.Discard, nil)
 	batch := make([]proto.PktRecord, 40)
 	for i := range batch {
 		batch[i] = protoRec(30 + i)

@@ -2,6 +2,7 @@ package collector
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -11,6 +12,14 @@ import (
 	"ipcap/internal/proto"
 )
 
+// isCorruptErr reports whether a frame read failed due to corruption rather
+// than a clean disconnect, so the collector can count it.
+func isCorruptErr(err error) bool {
+	return errors.Is(err, proto.ErrPayCRC) || errors.Is(err, proto.ErrHdrCRC) ||
+		errors.Is(err, proto.ErrBadMagic) || errors.Is(err, proto.ErrBadVersion) ||
+		errors.Is(err, proto.ErrPayloadHuge)
+}
+
 // Demux decodes one agent connection's frame stream, dedupes by gpidx, and
 // commits surviving packets to the mirror in strict order; the PCAP-over-IP
 // fan-out tails the mirror independently. It also feeds ACKs back to the agent.
@@ -19,15 +28,16 @@ type Demux struct {
 	name   string
 	mirror *Mirror
 	ackOut io.Writer
+	m      *Metrics
 
 	lastAckAt   time.Time
 	committedAt uint64
 	headGpidx   uint64
 }
 
-// NewDemux builds a demux for one source.
-func NewDemux(srcID uint16, name string, mirror *Mirror, ackOut io.Writer) *Demux {
-	return &Demux{srcID: srcID, name: name, mirror: mirror, ackOut: ackOut}
+// NewDemux builds a demux for one source. m may be nil.
+func NewDemux(srcID uint16, name string, mirror *Mirror, ackOut io.Writer, m *Metrics) *Demux {
+	return &Demux{srcID: srcID, name: name, mirror: mirror, ackOut: ackOut, m: m}
 }
 
 // Run reads the preamble then frames until the connection ends or ctx cancels.
@@ -56,10 +66,13 @@ func (d *Demux) Run(ctx context.Context, in io.Reader) error {
 		}
 		f, err := proto.ReadFrame(in)
 		if err != nil {
+			if isCorruptErr(err) {
+				d.m.onCorrupt()
+			}
 			return err
 		}
 		if f.SourceID != d.srcID && f.SourceID != 0 && f.Type != proto.FrameHeartbeat {
-			continue // single-source M1: ignore other sources
+			continue // single-source: ignore other sources
 		}
 		switch f.Type {
 		case proto.FramePktBatch:
@@ -85,9 +98,14 @@ func (d *Demux) Run(ctx context.Context, in io.Reader) error {
 		case proto.FrameHeartbeat:
 			if hb, derr := proto.DecodeHeartbeat(f.Payload); derr == nil {
 				d.headGpidx = hb.HeadGpidx
+				d.m.onLag(hb.HeadGpidx, d.mirror.Committed())
 			}
-		case proto.FrameSrcInfo, proto.FrameStats:
-			// informational in M1
+		case proto.FrameStats:
+			if st, derr := proto.DecodeStats(f.Payload); derr == nil {
+				d.m.onStats(st)
+			}
+		case proto.FrameSrcInfo:
+			// informational
 		default:
 			if !f.Type.Skippable() {
 				return errUnknownFrame(f.Type)
@@ -123,6 +141,11 @@ func (d *Demux) commit(base uint64, recs []proto.PktRecord, seq uint64) error {
 	if err := d.mirror.Append(keep, seq); err != nil {
 		return err
 	}
+	bytes := 0
+	for i := range keep {
+		bytes += pcapio.RecordHeaderLen + len(keep[i].Data)
+	}
+	d.m.onCommit(d.mirror.Committed(), bytes)
 	return nil
 }
 
@@ -139,6 +162,7 @@ func (d *Demux) handleGap(payload []byte) error {
 		return nil // already past it
 	}
 	log.Printf("collector: src%d GAP: lost gpidx [%d,%d) (%d packets)", d.srcID, committed, gap.ToGpidx, gap.ToGpidx-committed)
+	d.m.onGap()
 	if err := d.mirror.NewSession(gap.ToGpidx); err != nil {
 		return err
 	}

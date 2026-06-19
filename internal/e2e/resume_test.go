@@ -61,7 +61,7 @@ func runConnection(t *testing.T, spoolDir string, mirror *collector.Mirror, resu
 		serveOut.Close()
 	}()
 
-	demux := collector.NewDemux(1, "resume-test", mirror, demuxAckOut)
+	demux := collector.NewDemux(1, "resume-test", mirror, demuxAckOut, nil)
 	done := make(chan struct{})
 	go func() {
 		_ = demux.Run(ctx, demuxIn)

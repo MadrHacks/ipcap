@@ -117,6 +117,11 @@ func RunServe(ctx context.Context, opts ServeOptions) error {
 			return err
 		}
 		lastBeat = time.Now()
+		if st, ok := readStats(opts.SpoolDir); ok {
+			if err := s.sendStats(st); err != nil {
+				return err
+			}
+		}
 		return s.sendHeartbeat(r.Head())
 	}
 
@@ -258,6 +263,21 @@ func (s *streamer) sendHeartbeat(head uint64) error {
 		Payload:  proto.Heartbeat{TsNsec: uint64(time.Now().UnixNano()), HeadGpidx: head}.Encode(),
 	}
 	_, err := f.WriteTo(s.out)
+	return err
+}
+
+func (s *streamer) sendStats(st proto.Stats) error {
+	payload, err := proto.EncodeStats(st)
+	if err != nil {
+		return err
+	}
+	f := proto.Frame{
+		Type:     proto.FrameStats,
+		SourceID: s.srcID,
+		Seq:      s.next(proto.FrameStats),
+		Payload:  payload,
+	}
+	_, err = f.WriteTo(s.out)
 	return err
 }
 

@@ -13,6 +13,7 @@ import (
 	"golang.org/x/sys/unix"
 
 	"ipcap/internal/config"
+	"ipcap/internal/metrics"
 	"ipcap/internal/pcapio"
 	"ipcap/internal/pcapoverip"
 	"ipcap/internal/proto"
@@ -21,13 +22,14 @@ import (
 
 // Options configures a single-source collector.
 type Options struct {
-	ConfigDir  string
-	MirrorDir  string
-	SrcID      uint16
-	SrcName    string
-	ListenAddr string // local PCAP-over-IP re-serve, e.g. ":4242"
-	Snaplen    uint32
-	Key        transport.Keypair // collector's own static keypair
+	ConfigDir   string
+	MirrorDir   string
+	SrcID       uint16
+	SrcName     string
+	ListenAddr  string // local PCAP-over-IP re-serve, e.g. ":4242"
+	MetricsAddr string // Prometheus /metrics address, e.g. ":9100" ("" disables)
+	Snaplen     uint32
+	Key         transport.Keypair // collector's own static keypair
 }
 
 // Run holds the mirror lock, starts the re-serve listener, and supervises the
@@ -66,6 +68,17 @@ func Run(ctx context.Context, opts Options) error {
 		}()
 	}
 
+	var m *Metrics
+	if opts.MetricsAddr != "" {
+		reg := metrics.NewRegistry(map[string]string{"src": strconv.Itoa(int(opts.SrcID))})
+		m = NewMetrics(reg)
+		go func() {
+			if err := reg.Serve(opts.MetricsAddr); err != nil {
+				log.Printf("collector: metrics: %v", err)
+			}
+		}()
+	}
+
 	for {
 		select {
 		case <-ctx.Done():
@@ -94,7 +107,7 @@ func Run(ctx context.Context, opts Options) error {
 		}
 
 		resume := mirror.Committed()
-		if err := runOnce(ctx, opts, vb, agentPub, mirror, resume); err != nil {
+		if err := runOnce(ctx, opts, vb, agentPub, mirror, m, resume); err != nil {
 			log.Printf("collector: src%d session ended: %v", opts.SrcID, err)
 		}
 		if sleepCtx(ctx, 2*time.Second) {
@@ -105,7 +118,7 @@ func Run(ctx context.Context, opts Options) error {
 
 // runOnce dials the agent, sends the resume point, and drains until the session
 // ends.
-func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []byte, mirror *Mirror, resume uint64) error {
+func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []byte, mirror *Mirror, m *Metrics, resume uint64) error {
 	sessCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
@@ -115,10 +128,12 @@ func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []by
 		return err
 	}
 	defer conn.Close()
+	m.onReconnect()
 	go func() {
 		<-sessCtx.Done()
 		conn.Close()
 	}()
+	go watchConfigReload(sessCtx, cancel, opts.ConfigDir)
 	log.Printf("collector: src%d connected to %s, resume from gpidx %d", opts.SrcID, addr, resume)
 
 	// The resume point is authoritative and sent over the wire as the first ACK.
@@ -131,7 +146,7 @@ func runOnce(ctx context.Context, opts Options, vb config.Vulnbox, agentPub []by
 		return err
 	}
 
-	demux := NewDemux(opts.SrcID, opts.SrcName, mirror, conn)
+	demux := NewDemux(opts.SrcID, opts.SrcName, mirror, conn, m)
 	return demux.Run(sessCtx, conn)
 }
 
@@ -151,6 +166,26 @@ func flockDir(dir string) (func(), error) {
 		unix.Flock(int(f.Fd()), unix.LOCK_UN)
 		f.Close()
 	}, nil
+}
+
+// watchConfigReload cancels the session when vulnbox.yml/infra.yml change so the
+// supervisor reconnects with the new config (mirrors trafficsync's mtime reload).
+func watchConfigReload(ctx context.Context, cancel context.CancelFunc, dir string) {
+	initial := config.Mtimes(dir)
+	t := time.NewTicker(3 * time.Second)
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			if !config.MtimesEqual(initial, config.Mtimes(dir)) {
+				log.Printf("collector: config changed; reconnecting")
+				cancel()
+				return
+			}
+		}
+	}
 }
 
 func sleepCtx(ctx context.Context, d time.Duration) (cancelled bool) {
