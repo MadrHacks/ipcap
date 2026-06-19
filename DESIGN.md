@@ -71,11 +71,11 @@ PKT body (standalone or repeated in PKT_BATCH): [TsSec u64 | TsNsec u32 | OrigLe
   0x11 HEARTBEAT    {tsNsec u64, headGpidx u64} every 1s even idle (liveness + lag)
   0x12 STATS        CBOR {captured,dropped_kernel,ifdrop,spool_bytes,oldest_gpidx}
   0x13 GAP          {srcID u16, fromGpidx u64, toGpidx u64} — agent could NOT satisfy resume (reaped); explicit bounded logged loss marker (fixes silent skips durablecap#4/pcapwire#4/pcapmux#4)
-  -- RESERVED (forward-compatible, no redesign) --
-  0x20 TLS_KEYLOG     NSS keylog lines, tagged SourceID (eCapture master-secret)
-  0x21 TLS_PLAINTEXT  [StreamID u64|Dir u8|TsNsec u64|Len u32|bytes] decrypted app-data
-  0x22 TLS_META       CBOR {sni,cipher,5tuple,tls_version} correlate TLS->PKT flow
-  0x23..0x7F reserved
+  -- RESERVED (forward-compatible, no redesign) — high-bit so old collectors skip --
+  0xA0 TLS_KEYLOG     NSS keylog lines, tagged SourceID (eCapture master-secret)
+  0xA1 TLS_PLAINTEXT  [StreamID u64|Dir u8|TsNsec u64|Len u32|bytes] decrypted app-data
+  0xA2 TLS_META       CBOR {sni,cipher,5tuple,tls_version} correlate TLS->PKT flow
+  0x14..0x7F reserved (non-skippable); 0xA3..0xFF reserved (skippable)
 FrameType high bit 0x80 = "experimental/skippable": collector MUST silently skip unknown skippable types (PayloadLen-delimited), MUST hard-error+reconnect on unknown NON-skippable types (never silently drop load-bearing data).
 
 RESYNC RULE: on any read error/EOF/CRC failure the collector DISCARDS its entire parser buffer and re-parses from the next connection's preamble at the resume gpidx — partial bytes are NEVER carried across connections (fixes pcapmux#8 desync).

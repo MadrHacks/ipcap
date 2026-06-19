@@ -1,0 +1,261 @@
+package agent
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"io"
+	"log"
+	"time"
+
+	"ipcap/internal/pcapio"
+	"ipcap/internal/proto"
+	"ipcap/internal/spool"
+)
+
+// ServeOptions configures the short-lived, read-only serve streamer that sshd
+// spawns per collector connection.
+type ServeOptions struct {
+	SpoolDir        string
+	SrcID           uint16
+	SrcName         string
+	Resume          uint64 // next gpidx the collector needs (half-open)
+	BatchMaxPackets int
+	BatchMaxBytes   int
+	PollInterval    time.Duration
+	In              io.Reader // ACK frames from the collector
+	Out             io.Writer // frame stream to the collector
+}
+
+// RunServe streams frames for a single source from the durable spool, starting
+// at the resume gpidx, tailing live, never reading past the durable head. It
+// holds no durable state and exits when the collector disconnects (stdin EOF),
+// the output breaks, or the context is cancelled — killing it cannot touch the
+// capturer.
+func RunServe(ctx context.Context, opts ServeOptions) error {
+	if opts.BatchMaxPackets <= 0 {
+		opts.BatchMaxPackets = 256
+	}
+	if opts.BatchMaxBytes <= 0 {
+		opts.BatchMaxBytes = 1 << 20
+	}
+	if opts.PollInterval <= 0 {
+		opts.PollInterval = 50 * time.Millisecond
+	}
+
+	gh, err := spool.SourceHeader(opts.SpoolDir, opts.SrcID)
+	if err != nil {
+		return err
+	}
+
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go readAcks(ctx, cancel, opts.In)
+	// Unblock readAcks's blocking ReadFull on shutdown so it cannot leak past
+	// RunServe when the collector dies without closing stdin.
+	go func() {
+		<-ctx.Done()
+		if d, ok := opts.In.(interface{ SetReadDeadline(time.Time) error }); ok {
+			d.SetReadDeadline(time.Now())
+		} else if c, ok := opts.In.(io.Closer); ok {
+			c.Close()
+		}
+	}()
+
+	r, from, reaped, err := spool.OpenReader(opts.SpoolDir, opts.SrcID, gh.Snaplen, opts.Resume)
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+
+	out := bufio.NewWriterSize(opts.Out, 256<<10)
+	s := &streamer{out: out, srcID: opts.SrcID, seq: map[proto.FrameType]uint64{}}
+
+	if err := proto.WritePreamble(out, proto.PreambleHeader{
+		Compression: proto.CompressionNone,
+		Sources: []proto.SrcInfo{{
+			ID:       opts.SrcID,
+			Name:     opts.SrcName,
+			Linktype: uint16(gh.LinkType),
+			Snaplen:  gh.Snaplen,
+			Kind:     "afpacket",
+		}},
+		ResumeAck: map[uint16]uint64{opts.SrcID: from},
+	}); err != nil {
+		return err
+	}
+	if reaped {
+		if err := s.sendGap(opts.Resume, from); err != nil {
+			return err
+		}
+	}
+
+	batch := make([]proto.PktRecord, 0, opts.BatchMaxPackets)
+	var batchBytes int
+	var baseGpidx uint64
+	lastBeat := time.Now()
+
+	flush := func() error {
+		if len(batch) == 0 {
+			return nil
+		}
+		if err := s.sendBatch(baseGpidx, batch); err != nil {
+			return err
+		}
+		batch = batch[:0]
+		batchBytes = 0
+		return nil
+	}
+
+	beat := func() error {
+		if err := out.Flush(); err != nil {
+			return err
+		}
+		lastBeat = time.Now()
+		return s.sendHeartbeat(r.Head())
+	}
+
+	for {
+		select {
+		case <-ctx.Done():
+			return nil
+		default:
+		}
+
+		rec, gp, err := r.Next()
+		switch {
+		case err == nil:
+			if len(batch) == 0 {
+				baseGpidx = gp
+			}
+			batch = append(batch, pcapToProto(rec))
+			batchBytes += pcapio.RecordHeaderLen + len(rec.Data)
+			if len(batch) >= opts.BatchMaxPackets || batchBytes >= opts.BatchMaxBytes {
+				if err := flush(); err != nil {
+					return err
+				}
+			}
+			if time.Since(lastBeat) >= time.Second {
+				if err := beat(); err != nil {
+					return err
+				}
+			}
+
+		case errors.Is(err, spool.ErrNoData):
+			if err := flush(); err != nil {
+				return err
+			}
+			if err := beat(); err != nil {
+				return err
+			}
+			select {
+			case <-ctx.Done():
+				return nil
+			case <-time.After(opts.PollInterval):
+			}
+
+		case errors.Is(err, spool.ErrReaped):
+			if err := flush(); err != nil {
+				return err
+			}
+			lostFrom := r.Pos()
+			r.Close()
+			r, from, _, err = spool.OpenReader(opts.SpoolDir, opts.SrcID, gh.Snaplen, lostFrom)
+			if err != nil {
+				return err
+			}
+			log.Printf("serve: src %d resume %d reaped; gap [%d,%d)", opts.SrcID, lostFrom, lostFrom, from)
+			if err := s.sendGap(lostFrom, from); err != nil {
+				return err
+			}
+
+		default:
+			return err
+		}
+	}
+}
+
+// readAcks consumes ACK frames from the collector and cancels the stream when
+// the collector disconnects (stdin EOF/error).
+func readAcks(ctx context.Context, cancel context.CancelFunc, in io.Reader) {
+	defer cancel()
+	if in == nil {
+		return
+	}
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+		f, err := proto.ReadFrame(in)
+		if err != nil {
+			return
+		}
+		if f.Type == proto.FrameAck {
+			// Acks inform retention safety; the capturer's byte-cap janitor is
+			// the M1 reaper, so we only log here.
+			if a, derr := proto.DecodeAck(f.Payload); derr == nil {
+				_ = a
+			}
+		}
+	}
+}
+
+func pcapToProto(rec pcapio.Record) proto.PktRecord {
+	return proto.PktRecord{
+		TsSec:   uint64(rec.TsSec),
+		TsNsec:  rec.TsUsec * 1000,
+		OrigLen: rec.OrigLen,
+		CapLen:  uint32(len(rec.Data)),
+		Data:    rec.Data,
+	}
+}
+
+// streamer frames and writes to the collector, tracking per-type sequence.
+type streamer struct {
+	out   io.Writer
+	srcID uint16
+	seq   map[proto.FrameType]uint64
+}
+
+func (s *streamer) next(t proto.FrameType) uint64 {
+	v := s.seq[t]
+	s.seq[t] = v + 1
+	return v
+}
+
+func (s *streamer) sendBatch(baseGpidx uint64, recs []proto.PktRecord) error {
+	f := proto.Frame{
+		Type:      proto.FramePktBatch,
+		SourceID:  s.srcID,
+		BaseGpidx: baseGpidx,
+		Seq:       s.next(proto.FramePktBatch),
+		Payload:   proto.EncodePktBatch(recs),
+	}
+	_, err := f.WriteTo(s.out)
+	return err
+}
+
+func (s *streamer) sendHeartbeat(head uint64) error {
+	f := proto.Frame{
+		Type:     proto.FrameHeartbeat,
+		SourceID: s.srcID,
+		Seq:      s.next(proto.FrameHeartbeat),
+		Payload:  proto.Heartbeat{TsNsec: uint64(time.Now().UnixNano()), HeadGpidx: head}.Encode(),
+	}
+	_, err := f.WriteTo(s.out)
+	return err
+}
+
+func (s *streamer) sendGap(from, to uint64) error {
+	f := proto.Frame{
+		Type:     proto.FrameGap,
+		Flags:    proto.FlagGap,
+		SourceID: s.srcID,
+		Seq:      s.next(proto.FrameGap),
+		Payload:  proto.Gap{SrcID: s.srcID, FromGpidx: from, ToGpidx: to}.Encode(),
+	}
+	_, err := f.WriteTo(s.out)
+	return err
+}

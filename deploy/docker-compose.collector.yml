@@ -1,0 +1,27 @@
+# Collector service, mirroring the trafficsync wiring: it reads vulnbox.yml /
+# infra.yml from /config, drains the vulnbox agent over SSH, writes a durable
+# mirror to /traffic, and re-serves standard PCAP-over-IP on :4242 for the tulip
+# assembler and suricata. Merge into the tulip docker-compose.
+services:
+  ipcap-collector:
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+    image: ghcr.io/madrhacks/ipcap:${IPCAP_IMAGE_TAG:-latest}
+    restart: always
+    command:
+      - collector
+      - --config-dir=/config
+      - --mirror-dir=/traffic
+      - --listen=:4242
+      - --agent-spool-dir=/var/lib/ipcap/spool
+    volumes:
+      - ./config:/config:ro
+      - ipcap-mirror:/traffic
+    ports:
+      # Expose the re-served PCAP-over-IP locally; tulip's assembler/suricata
+      # connect to ipcap-collector:4242 on the compose network.
+      - "4242:4242"
+
+volumes:
+  ipcap-mirror:
