@@ -50,6 +50,10 @@ func RunServe(ctx context.Context, opts ServeOptions) error {
 	if err != nil {
 		return err
 	}
+	epoch, err := spool.Epoch(opts.SpoolDir)
+	if err != nil {
+		return err
+	}
 
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -88,6 +92,7 @@ func RunServe(ctx context.Context, opts ServeOptions) error {
 			Linktype: uint16(gh.LinkType),
 			Snaplen:  gh.Snaplen,
 			Kind:     "afpacket",
+			Epoch:    epoch,
 		}},
 		ResumeAck: map[uint16]uint64{opts.SrcID: from},
 	}); err != nil {

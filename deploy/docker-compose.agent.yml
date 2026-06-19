@@ -5,6 +5,15 @@
 # hooker needs host eBPF + host pid visibility to reach every vulnservice's libssl
 # — none of which reduces isolation (the agent is root-level either way).
 #
+# The spool + keylog live in docker NAMED VOLUMES: they survive every container
+# restart, crash, and `compose up --build`, so on a restart/redeploy the capture
+# resumes the same gpidx space (the spool's recovery reads the existing segments
+# and continues) and the collector resumes exactly-once from its commit point —
+# no gap, no reset. The data is wiped only when the operator explicitly asks
+# (`compose down -v`). Even then it self-heals: the agent stamps the spool with
+# an epoch and the collector realigns its commit point when the epoch changes,
+# instead of stalling on a gpidx the fresh spool will never reach.
+#
 # Required: ./agent.key (this vulnbox's private key) and IPCAP_COLLECTOR_PUB (the
 # collector's public key). Optional: ./tls_targets.yml (TLS override) and
 # IPCAP_IFACE (capture interface, default eth0).

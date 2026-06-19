@@ -52,7 +52,12 @@ func OpenReader(dir string, srcID uint16, snaplen uint32, fromGpidx uint64) (*Re
 		reaped = true
 	}
 	if fromGpidx > r.head {
-		fromGpidx = r.head // newer than head (shouldn't happen): clamp, serve from head
+		// The collector asked to resume past everything this spool holds. Since
+		// the agent never serves beyond its head, the only way committed can
+		// exceed head is a wiped/redeployed spool whose gpidx space restarted.
+		// Serve from the oldest retained packet so the collector gets all of the
+		// fresh spool's data; it realigns its commit point via the epoch change.
+		fromGpidx = r.oldest
 	}
 	r.gpidx = fromGpidx
 	return r, fromGpidx, reaped, nil

@@ -23,6 +23,10 @@ type ResumeState struct {
 	SessionSeq        uint64 `json:"session"`
 	SessionStartGpidx uint64 `json:"session_start"`
 	LastSeq           uint64 `json:"last_seq"`
+	// Epoch is the agent spool instance this commit point belongs to. When the
+	// agent advertises a different epoch the spool was wiped/redeployed, so the
+	// commit point is meaningless and the mirror realigns to the fresh stream.
+	Epoch string `json:"epoch,omitempty"`
 }
 
 // Mirror is the durable, Wireshark-openable copy of a source's committed
@@ -251,6 +255,31 @@ func (m *Mirror) NewSession(startGpidx uint64) error {
 	}
 	m.publish()
 	return nil
+}
+
+// Epoch returns the agent spool instance the current commit point belongs to,
+// or "" if none has been recorded yet.
+func (m *Mirror) Epoch() string { return m.state.Epoch }
+
+// AdoptEpoch records the agent's spool epoch on first contact, without touching
+// the commit point. Used when the mirror has no epoch yet (a fresh collector, or
+// an upgrade from an agent that predated epochs).
+func (m *Mirror) AdoptEpoch(epoch string) error {
+	if m.state.Epoch == epoch {
+		return nil
+	}
+	m.state.Epoch = epoch
+	return m.persistState()
+}
+
+// ResetForEpoch realigns the mirror to a fresh agent spool instance: it records
+// the new epoch and rotates to a new session starting at base, so the prior
+// epoch's mirror file is left intact while the assembler restarts cleanly on the
+// new gpidx space — instead of the collector stalling forever on a commit point
+// the fresh spool will never reach.
+func (m *Mirror) ResetForEpoch(epoch string, base uint64) error {
+	m.state.Epoch = epoch
+	return m.NewSession(base)
 }
 
 // persistState atomically writes resume.json and fsyncs it (and its directory).

@@ -54,6 +54,9 @@ func (d *Demux) Run(ctx context.Context, in io.Reader) error {
 			if err := d.mirror.SetHeader(gh); err != nil {
 				return err
 			}
+			if err := d.reconcileEpoch(s.Epoch, pre.ResumeAck[d.srcID]); err != nil {
+				return err
+			}
 		}
 	}
 	d.committedAt = d.mirror.Committed()
@@ -118,6 +121,28 @@ func (d *Demux) Run(ctx context.Context, in io.Reader) error {
 		}
 		d.maybeAck(false)
 	}
+}
+
+// reconcileEpoch aligns the mirror with the agent's advertised spool instance.
+// On first contact it records the epoch; if the epoch changed, the agent's spool
+// was wiped/redeployed and its gpidx space restarted, so the mirror realigns to
+// the fresh stream (resetting its commit point to from) rather than stalling
+// forever on a gpidx the new spool will never reach. An empty epoch (agent
+// predating epochs) is ignored — behaviour is unchanged.
+func (d *Demux) reconcileEpoch(epoch string, from uint64) error {
+	if epoch == "" {
+		return nil
+	}
+	have := d.mirror.Epoch()
+	if have == "" {
+		return d.mirror.AdoptEpoch(epoch)
+	}
+	if have == epoch {
+		return nil
+	}
+	log.Printf("collector: src%d agent spool reset (epoch %s -> %s); realigning commit %d -> %d",
+		d.srcID, have, epoch, d.mirror.Committed(), from)
+	return d.mirror.ResetForEpoch(epoch, from)
 }
 
 // commit dedupes a contiguous batch against the commit point, durably appends

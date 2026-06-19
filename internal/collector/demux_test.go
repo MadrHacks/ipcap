@@ -95,3 +95,82 @@ func TestDoubleCollectorFlock(t *testing.T) {
 	}
 	unlock2()
 }
+
+// TestDemuxEpochResetRealignsCommit verifies the spool-wipe self-heal: when the
+// agent advertises a new spool epoch, the mirror realigns its commit point to
+// the fresh stream's base instead of stalling forever on a stale gpidx the new
+// spool will never reach (which is what happens if dedup keeps dropping the
+// fresh low-gpidx packets as "already committed").
+func TestDemuxEpochResetRealignsCommit(t *testing.T) {
+	dir := t.TempDir()
+	gh := pcapio.GlobalHeader{Snaplen: 65536, LinkType: 1}
+	mirror, err := OpenMirror(dir, 1, gh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer mirror.Close()
+
+	// Old epoch "A": commit 100 packets.
+	recs := make([]pcapio.Record, 100)
+	for i := range recs {
+		recs[i] = protoToPcap(protoRec(i))
+	}
+	if err := mirror.Append(recs, 1); err != nil {
+		t.Fatal(err)
+	}
+
+	d := NewDemux(1, "t", mirror, io.Discard, nil, nil)
+
+	// First contact records the epoch without moving the commit point.
+	if err := d.reconcileEpoch("A", 100); err != nil {
+		t.Fatal(err)
+	}
+	if mirror.Committed() != 100 || mirror.Epoch() != "A" {
+		t.Fatalf("adopt: commit=%d epoch=%q, want 100/A", mirror.Committed(), mirror.Epoch())
+	}
+
+	// Same epoch on reconnect: no change.
+	if err := d.reconcileEpoch("A", 100); err != nil {
+		t.Fatal(err)
+	}
+	if mirror.Committed() != 100 {
+		t.Fatalf("same-epoch moved commit to %d", mirror.Committed())
+	}
+
+	// New epoch "B" (spool wiped): the fresh spool serves from gpidx 0, so the
+	// mirror must realign there and rotate to a new session.
+	sessBefore := mirror.state.SessionSeq
+	if err := d.reconcileEpoch("B", 0); err != nil {
+		t.Fatal(err)
+	}
+	if mirror.Committed() != 0 || mirror.Epoch() != "B" {
+		t.Fatalf("reset: commit=%d epoch=%q, want 0/B", mirror.Committed(), mirror.Epoch())
+	}
+	if mirror.state.SessionSeq <= sessBefore {
+		t.Fatalf("epoch reset did not rotate session (%d <= %d)", mirror.state.SessionSeq, sessBefore)
+	}
+
+	// The realigned stream now accepts the fresh spool's gpidx 0.. — which under
+	// the stale commit point would have been dropped as duplicates indefinitely.
+	fresh := make([]proto.PktRecord, 10)
+	for i := range fresh {
+		fresh[i] = protoRec(i)
+	}
+	if err := d.commit(0, fresh, 2); err != nil {
+		t.Fatal(err)
+	}
+	if mirror.Committed() != 10 {
+		t.Fatalf("post-reset commit=%d, want 10", mirror.Committed())
+	}
+
+	// The realignment must survive a collector restart (durably persisted).
+	mirror.Close()
+	re, err := OpenMirror(dir, 1, gh)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer re.Close()
+	if re.Epoch() != "B" || re.Committed() != 10 {
+		t.Fatalf("reopened: epoch=%q commit=%d, want B/10", re.Epoch(), re.Committed())
+	}
+}

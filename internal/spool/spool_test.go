@@ -277,3 +277,60 @@ func TestResumeOlderThanRetentionReaps(t *testing.T) {
 		t.Fatalf("clamped resume = %d, want oldest %d", from, oldest)
 	}
 }
+
+// TestOpenReaderResumePastHeadServesOldest covers the wiped-spool signature: a
+// resume gpidx newer than everything the spool holds is only possible when the
+// collector's commit point came from a previous spool instance. The reader must
+// then serve from the oldest retained packet (so the collector gets all the
+// fresh data and realigns via the epoch), not clamp to head and stall.
+func TestOpenReaderResumePastHeadServesOldest(t *testing.T) {
+	dir := t.TempDir()
+	w, err := NewWriter(Config{Dir: dir, SrcID: 1, Snaplen: 65536, LinkType: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeN(t, w, 20)
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	r, from, reaped, err := OpenReader(dir, 1, 65536, 9999)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if reaped {
+		t.Fatal("wipe case must not flag reaped (no GAP frame; epoch handles realignment)")
+	}
+	if from != 0 {
+		t.Fatalf("from=%d, want 0 (oldest) so the fresh spool's data is fully served", from)
+	}
+	if got := drainAll(t, r, 0); got != 20 {
+		t.Fatalf("served %d packets, want 20", got)
+	}
+}
+
+// TestEpochReadOrCreate verifies the spool epoch is stable across calls and
+// reflects a wipe (fresh directory -> new id).
+func TestEpochReadOrCreate(t *testing.T) {
+	dir := t.TempDir()
+	a, err := Epoch(dir)
+	if err != nil || a == "" {
+		t.Fatalf("Epoch: %q err=%v", a, err)
+	}
+	b, err := Epoch(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a != b {
+		t.Fatalf("epoch not stable across calls: %q != %q", a, b)
+	}
+	// A fresh directory (a wipe) yields a different epoch.
+	c, err := Epoch(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if c == a {
+		t.Fatal("a wiped spool must get a new epoch")
+	}
+}

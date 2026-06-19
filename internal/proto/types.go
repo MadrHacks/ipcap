@@ -242,6 +242,11 @@ type SrcInfo struct {
 	Linktype uint16 `cbor:"linktype"`
 	Snaplen  uint32 `cbor:"snaplen"`
 	Kind     string `cbor:"kind"`
+	// Epoch identifies the agent's spool instance (gpidx space). A change
+	// between connections means the spool was wiped/redeployed, so the collector
+	// realigns its commit point instead of stalling on a gpidx the fresh spool
+	// will never reach. Empty for agents predating epochs.
+	Epoch string `cbor:"epoch,omitempty"`
 }
 
 // Stats is a capture statistics snapshot (FrameStats, CBOR-encoded).
