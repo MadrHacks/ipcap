@@ -43,13 +43,10 @@ func (g GlobalHeader) AppendTo(dst []byte) []byte {
 	return append(dst, h[:]...)
 }
 
-// WriteGlobalHeader writes the global header to w.
-func (g GlobalHeader) WriteTo(w io.Writer) (int64, error) {
-	n, err := w.Write(g.AppendTo(nil))
-	return int64(n), err
-}
-
-var ErrBadGlobalHeader = errors.New("pcapio: bad global header")
+var (
+	ErrBadGlobalHeader = errors.New("pcapio: bad global header")
+	ErrBadRecord       = errors.New("pcapio: bad record")
+)
 
 // ParseGlobalHeader reads a 24-byte global header from b. Only the classic
 // microsecond magic is accepted (the only format this package writes).
@@ -87,6 +84,49 @@ func (r Record) AppendTo(dst []byte) []byte {
 	binary.LittleEndian.PutUint32(h[12:], r.OrigLen)
 	dst = append(dst, h[:]...)
 	return append(dst, r.Data...)
+}
+
+// ParseRecordHeader decodes the 16-byte little-endian record header from hdr
+// (which must be at least RecordHeaderLen long) into a Record without its Data,
+// returning the declared capture length separately so the caller can read or
+// skip the body.
+func ParseRecordHeader(hdr []byte) (capLen uint32, rec Record) {
+	return binary.LittleEndian.Uint32(hdr[8:]), Record{
+		TsSec:   binary.LittleEndian.Uint32(hdr[0:]),
+		TsUsec:  binary.LittleEndian.Uint32(hdr[4:]),
+		OrigLen: binary.LittleEndian.Uint32(hdr[12:]),
+	}
+}
+
+// ReadRecordAt reads exactly one whole record at byte offset off from r, never
+// reading past limit (the durable, whole-record extent the caller is allowed to
+// touch). It returns ok=false with no error when the record header or body would
+// cross limit (not enough durable bytes yet), and ErrBadRecord when the declared
+// capLen exceeds snaplen (a corrupt record inside the durable region). On
+// success it returns the Record with Data, the byte offset just past it, and
+// ok=true.
+func ReadRecordAt(r io.ReaderAt, off, limit int64, snaplen uint32) (rec Record, next int64, ok bool, err error) {
+	if off+RecordHeaderLen > limit {
+		return Record{}, off, false, nil
+	}
+	var hdr [RecordHeaderLen]byte
+	if _, err := r.ReadAt(hdr[:], off); err != nil {
+		return Record{}, off, false, err
+	}
+	capLen, rec := ParseRecordHeader(hdr[:])
+	if capLen > snaplen {
+		return Record{}, off, false, ErrBadRecord
+	}
+	end := off + int64(RecordHeaderLen) + int64(capLen)
+	if end > limit {
+		return Record{}, off, false, nil
+	}
+	data := make([]byte, capLen)
+	if _, err := r.ReadAt(data, off+RecordHeaderLen); err != nil {
+		return Record{}, off, false, err
+	}
+	rec.Data = data
+	return rec, end, true, nil
 }
 
 // ScanRecords reads records sequentially from r (positioned just after the
@@ -145,7 +185,7 @@ func ReadRecord(r io.Reader, snaplen uint32) (Record, error) {
 	}
 	capLen := binary.LittleEndian.Uint32(hdr[8:])
 	if capLen > snaplen {
-		return Record{}, ErrBadGlobalHeader
+		return Record{}, ErrBadRecord
 	}
 	data := make([]byte, capLen)
 	if _, err := io.ReadFull(r, data); err != nil {

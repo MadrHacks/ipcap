@@ -13,7 +13,6 @@ package pcapoverip
 
 import (
 	"context"
-	"encoding/binary"
 	"net"
 	"os"
 	"time"
@@ -78,7 +77,6 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 	}
 	defer f.Close()
 
-	var hdr [pcapio.RecordHeaderLen]byte
 	for {
 		select {
 		case <-ctx.Done():
@@ -90,26 +88,15 @@ func (s *Server) serve(ctx context.Context, conn net.Conn) {
 			return // a GAP rotated the session; the client reconnects fresh
 		}
 		progressed := false
-		for cursor+pcapio.RecordHeaderLen <= committedLen {
-			if _, err := f.ReadAt(hdr[:], cursor); err != nil {
-				break // not durably present yet; retry after poll
+		for {
+			rec, next, ok, err := pcapio.ReadRecordAt(f, cursor, committedLen, gh.Snaplen)
+			if err != nil || !ok {
+				break // not durably present yet (or corrupt); retry after poll
 			}
-			capLen := int64(binary.LittleEndian.Uint32(hdr[8:]))
-			recEnd := cursor + pcapio.RecordHeaderLen + capLen
-			if recEnd > committedLen {
-				break
-			}
-			body := make([]byte, capLen)
-			if _, err := f.ReadAt(body, cursor+pcapio.RecordHeaderLen); err != nil {
-				break
-			}
-			if _, err := conn.Write(hdr[:]); err != nil {
+			if _, err := conn.Write(rec.AppendTo(nil)); err != nil {
 				return
 			}
-			if _, err := conn.Write(body); err != nil {
-				return
-			}
-			cursor = recEnd
+			cursor = next
 			progressed = true
 		}
 		if !progressed {

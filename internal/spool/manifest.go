@@ -14,6 +14,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"ipcap/internal/pcapio"
 )
 
 // Segment describes one spool file's gpidx coverage. EndGpidx is exclusive:
@@ -28,9 +30,6 @@ type Segment struct {
 	ValidLen   int64  `json:"vlen"`
 	Sealed     bool   `json:"sealed"`
 }
-
-// Count is the number of packets the segment is recorded to hold.
-func (s Segment) Count() uint64 { return s.EndGpidx - s.StartGpidx }
 
 const (
 	manifestName = "manifest.ndjson"
@@ -121,19 +120,7 @@ func writeHead(dir string, seg Segment) error {
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(dir, headName+".tmp")
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, filepath.Join(dir, headName)); err != nil {
-		return err
-	}
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
+	return pcapio.WriteFileAtomic(filepath.Join(dir, headName), b, false)
 }
 
 // listSegmentFiles returns the sequences of all segment files for srcID on disk,

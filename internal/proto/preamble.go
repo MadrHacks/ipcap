@@ -81,15 +81,6 @@ func ReadPreamble(r io.Reader) (PreambleHeader, error) {
 	return h, nil
 }
 
-// EncodeSrcInfo / DecodeSrcInfo carry a SrcInfo as a SRCINFO frame payload.
-func EncodeSrcInfo(s SrcInfo) ([]byte, error) { return cbor.Marshal(s) }
-
-func DecodeSrcInfo(b []byte) (SrcInfo, error) {
-	var s SrcInfo
-	err := cbor.Unmarshal(b, &s)
-	return s, err
-}
-
 // EncodeStats / DecodeStats carry a Stats snapshot as a STATS frame payload.
 func EncodeStats(s Stats) ([]byte, error) { return cbor.Marshal(s) }
 

@@ -193,14 +193,6 @@ func (d *Demux) maybeAck(force bool) {
 	d.lastAckAt = time.Now()
 }
 
-// Lag returns how far the collector trails the agent's reported head.
-func (d *Demux) Lag() uint64 {
-	if d.headGpidx > d.mirror.Committed() {
-		return d.headGpidx - d.mirror.Committed()
-	}
-	return 0
-}
-
 func protoToPcap(pr proto.PktRecord) pcapio.Record {
 	return pcapio.Record{
 		TsSec:   uint32(pr.TsSec),

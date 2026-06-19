@@ -9,8 +9,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/sys/unix"
-
 	"ipcap/internal/pcapio"
 )
 
@@ -42,22 +40,6 @@ func (c *Config) applyDefaults() {
 	if c.Snaplen == 0 {
 		c.Snaplen = 65536
 	}
-}
-
-// syncFile flushes a file's data to stable storage (data + size, not mtime).
-func syncFile(f *os.File) error { return unix.Fdatasync(int(f.Fd())) }
-
-// syncDir fsyncs a directory so newly created files' directory entries (names)
-// are durable. fdatasync of a file flushes its contents but NOT its dirent, so
-// without this a hard power cut could lose a just-created segment's name while
-// keeping its bytes — regressing the durable head and reissuing gpidx.
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }
 
 // Writer is the durable, append-only spool writer for one source. It is the
@@ -101,7 +83,7 @@ func NewWriter(cfg Config) (*Writer, error) {
 		return nil, err
 	}
 	// Make the manifest's directory entry durable before it anchors any gpidx.
-	if err := syncDir(cfg.Dir); err != nil {
+	if err := pcapio.SyncDir(cfg.Dir); err != nil {
 		mf.Close()
 		return nil, err
 	}
@@ -166,13 +148,13 @@ func (w *Writer) openNewSegment(seq, startGpidx uint64) error {
 		f.Close()
 		return err
 	}
-	if err := syncFile(f); err != nil {
+	if err := pcapio.Fdatasync(f); err != nil {
 		f.Close()
 		return err
 	}
 	// Make the new segment's directory entry durable before any gpidx it covers
 	// can be advertised, so a power cut cannot lose the name and regress head.
-	if err := syncDir(w.cfg.Dir); err != nil {
+	if err := pcapio.SyncDir(w.cfg.Dir); err != nil {
 		f.Close()
 		return err
 	}
@@ -247,7 +229,7 @@ func (w *Writer) Tick() error {
 
 // sync fdatasyncs the active segment and advertises the new durable head.
 func (w *Writer) sync() error {
-	if err := syncFile(w.file); err != nil {
+	if err := pcapio.Fdatasync(w.file); err != nil {
 		return err
 	}
 	w.durableLen = w.fileOffset
@@ -305,7 +287,7 @@ func (w *Writer) sealToManifest(seg Segment) error {
 	if _, err := w.manifest.Write(append(line, '\n')); err != nil {
 		return err
 	}
-	if err := syncFile(w.manifest); err != nil {
+	if err := pcapio.Fdatasync(w.manifest); err != nil {
 		return err
 	}
 	w.sealed[seg.Seq] = seg

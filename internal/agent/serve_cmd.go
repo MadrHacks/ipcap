@@ -13,8 +13,8 @@ import (
 	"ipcap/internal/spool"
 )
 
-// ServeOptions configures the short-lived, read-only serve streamer that sshd
-// spawns per collector connection.
+// ServeOptions configures the short-lived, read-only serve streamer that is
+// invoked per Noise connection by the listener.
 type ServeOptions struct {
 	SpoolDir        string
 	SrcID           uint16
@@ -30,9 +30,10 @@ type ServeOptions struct {
 
 // RunServe streams frames for a single source from the durable spool, starting
 // at the resume gpidx, tailing live, never reading past the durable head. It
-// holds no durable state and exits when the collector disconnects (stdin EOF),
-// the output breaks, or the context is cancelled — killing it cannot touch the
-// capturer.
+// runs as a goroutine per Noise connection in the listener process, holds no
+// durable state, and exits when the collector disconnects (input EOF), the
+// output breaks, or the context is cancelled — it is independent of the capture
+// process, so its lifetime never touches the capturer.
 func RunServe(ctx context.Context, opts ServeOptions) error {
 	if opts.BatchMaxPackets <= 0 {
 		opts.BatchMaxPackets = 256
@@ -53,7 +54,7 @@ func RunServe(ctx context.Context, opts ServeOptions) error {
 	defer cancel()
 	go readAcks(ctx, cancel, opts.In)
 	// Unblock readAcks's blocking ReadFull on shutdown so it cannot leak past
-	// RunServe when the collector dies without closing stdin.
+	// RunServe when the collector dies without closing its end of the connection.
 	go func() {
 		<-ctx.Done()
 		if d, ok := opts.In.(interface{ SetReadDeadline(time.Time) error }); ok {
@@ -186,7 +187,7 @@ func RunServe(ctx context.Context, opts ServeOptions) error {
 }
 
 // readAcks consumes ACK frames from the collector and cancels the stream when
-// the collector disconnects (stdin EOF/error).
+// the collector disconnects (input EOF/error).
 func readAcks(ctx context.Context, cancel context.CancelFunc, in io.Reader) {
 	defer cancel()
 	if in == nil {
@@ -198,16 +199,10 @@ func readAcks(ctx context.Context, cancel context.CancelFunc, in io.Reader) {
 			return
 		default:
 		}
-		f, err := proto.ReadFrame(in)
-		if err != nil {
+		// ACKs are advisory; retention is byte-cap enforced by the capture
+		// janitor. We only read frames to detect the collector disconnecting.
+		if _, err := proto.ReadFrame(in); err != nil {
 			return
-		}
-		if f.Type == proto.FrameAck {
-			// Acks inform retention safety; the capturer's byte-cap janitor is
-			// the M1 reaper, so we only log here.
-			if a, derr := proto.DecodeAck(f.Payload); derr == nil {
-				_ = a
-			}
 		}
 	}
 }

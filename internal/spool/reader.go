@@ -1,7 +1,6 @@
 package spool
 
 import (
-	"encoding/binary"
 	"errors"
 	"os"
 	"path/filepath"
@@ -198,7 +197,7 @@ func (r *Reader) position(seg Segment, targetGpidx uint64) error {
 		if _, err := f.ReadAt(hdr[:], r.offset); err != nil {
 			return err
 		}
-		capLen := binary.LittleEndian.Uint32(hdr[8:])
+		capLen, _ := pcapio.ParseRecordHeader(hdr[:])
 		r.offset += int64(pcapio.RecordHeaderLen) + int64(capLen)
 		gp++
 	}
@@ -208,32 +207,12 @@ func (r *Reader) position(seg Segment, targetGpidx uint64) error {
 // readAt reads the record at the current offset if fully within seg's durable
 // extent. ok is false when not enough durable bytes are present yet.
 func (r *Reader) readAt(seg Segment) (pcapio.Record, bool, error) {
-	if r.offset+pcapio.RecordHeaderLen > seg.ValidLen {
-		return pcapio.Record{}, false, nil
-	}
-	var hdr [pcapio.RecordHeaderLen]byte
-	if _, err := r.file.ReadAt(hdr[:], r.offset); err != nil {
+	rec, next, ok, err := pcapio.ReadRecordAt(r.file, r.offset, seg.ValidLen, r.snaplen)
+	if err != nil || !ok {
 		return pcapio.Record{}, false, err
 	}
-	capLen := binary.LittleEndian.Uint32(hdr[8:])
-	if capLen > r.snaplen {
-		return pcapio.Record{}, false, errors.New("spool: corrupt record in durable region")
-	}
-	end := r.offset + int64(pcapio.RecordHeaderLen) + int64(capLen)
-	if end > seg.ValidLen {
-		return pcapio.Record{}, false, nil
-	}
-	data := make([]byte, capLen)
-	if _, err := r.file.ReadAt(data, r.offset+pcapio.RecordHeaderLen); err != nil {
-		return pcapio.Record{}, false, err
-	}
-	r.offset = end
-	return pcapio.Record{
-		TsSec:   binary.LittleEndian.Uint32(hdr[0:]),
-		TsUsec:  binary.LittleEndian.Uint32(hdr[4:]),
-		OrigLen: binary.LittleEndian.Uint32(hdr[12:]),
-		Data:    data,
-	}, true, nil
+	r.offset = next
+	return rec, true, nil
 }
 
 // Close releases the open segment file.

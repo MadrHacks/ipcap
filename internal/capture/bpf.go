@@ -69,7 +69,7 @@ const (
 	ipProtoTCP    = 6
 )
 
-// Exclude reports whether the packet is SSH/management traffic to be dropped.
+// Exclude reports whether the packet is drain/management traffic to be dropped.
 // It returns false (keep) for anything it cannot fully parse, so it can never
 // be made to do unbounded work and never wrongly excludes game traffic.
 func (e *Excluder) Exclude(data []byte) bool {

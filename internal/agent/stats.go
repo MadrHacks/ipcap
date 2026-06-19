@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"ipcap/internal/pcapio"
 	"ipcap/internal/proto"
 )
 
@@ -20,11 +21,7 @@ func writeStats(spoolDir string, s proto.Stats) error {
 	if err != nil {
 		return err
 	}
-	tmp := filepath.Join(spoolDir, statsFile+".tmp")
-	if err := os.WriteFile(tmp, b, 0o644); err != nil {
-		return err
-	}
-	return os.Rename(tmp, filepath.Join(spoolDir, statsFile))
+	return pcapio.WriteFileAtomic(filepath.Join(spoolDir, statsFile), b, false)
 }
 
 // readStats reads the latest published capture stats, if any.

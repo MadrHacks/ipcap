@@ -1,10 +1,9 @@
-// Package collector implements the tulip-host side: the SSH supervisor that
+// Package collector implements the tulip-host side: the Noise supervisor that
 // drains a vulnbox agent, the frame demux with gpidx dedupe and strict-order
 // durable commit, and the per-source mirror feeding the PCAP-over-IP re-serve.
 package collector
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -12,8 +11,6 @@ import (
 	"os"
 	"path/filepath"
 	"sync/atomic"
-
-	"golang.org/x/sys/unix"
 
 	"ipcap/internal/pcapio"
 )
@@ -143,7 +140,7 @@ func (m *Mirror) openSession() error {
 			return err
 		}
 	}
-	if err := syncFile(f); err != nil {
+	if err := pcapio.Fdatasync(f); err != nil {
 		f.Close()
 		return err
 	}
@@ -166,7 +163,7 @@ func recordOffsetForCount(f *os.File, snaplen uint32, want uint64) (offset int64
 		if _, err := f.ReadAt(hdr[:], offset); err != nil {
 			return offset, have, nil // EOF/short: fewer records than want
 		}
-		capLen := binary.LittleEndian.Uint32(hdr[8:])
+		capLen, _ := pcapio.ParseRecordHeader(hdr[:])
 		if capLen > snaplen {
 			return offset, have, nil
 		}
@@ -179,12 +176,6 @@ func recordOffsetForCount(f *os.File, snaplen uint32, want uint64) (offset int64
 // Committed returns the half-open commit point (next gpidx needed). Safe to
 // call concurrently with the writer.
 func (m *Mirror) Committed() uint64 { return m.committed.Load() }
-
-// SessionStart returns the gpidx of the first record in the current session.
-func (m *Mirror) SessionStart() uint64 { return m.sessionStart.Load() }
-
-// Header returns the mirror's libpcap global header.
-func (m *Mirror) Header() pcapio.GlobalHeader { return m.gh }
 
 // SetHeader adopts the link type learned from the agent preamble so the durable
 // mirror, the spool, and the re-served stream all declare one consistent link
@@ -208,7 +199,7 @@ func (m *Mirror) SetHeader(h pcapio.GlobalHeader) error {
 	if _, err := m.file.Write(m.gh.AppendTo(nil)); err != nil {
 		return err
 	}
-	if err := syncFile(m.file); err != nil {
+	if err := pcapio.Fdatasync(m.file); err != nil {
 		return err
 	}
 	_, err := m.file.Seek(0, io.SeekEnd)
@@ -230,7 +221,7 @@ func (m *Mirror) Append(recs []pcapio.Record, lastSeq uint64) error {
 	if _, err := m.file.Write(buf); err != nil {
 		return err
 	}
-	if err := syncFile(m.file); err != nil {
+	if err := pcapio.Fdatasync(m.file); err != nil {
 		return err
 	}
 	m.fileLen += int64(len(buf))
@@ -268,26 +259,7 @@ func (m *Mirror) persistState() error {
 	if err != nil {
 		return err
 	}
-	tmp := resumePath(m.dir, m.srcID) + ".tmp"
-	f, err := os.OpenFile(tmp, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
-	if err != nil {
-		return err
-	}
-	if _, err := f.Write(b); err != nil {
-		f.Close()
-		return err
-	}
-	if err := syncFile(f); err != nil {
-		f.Close()
-		return err
-	}
-	if err := f.Close(); err != nil {
-		return err
-	}
-	if err := os.Rename(tmp, resumePath(m.dir, m.srcID)); err != nil {
-		return err
-	}
-	return syncDir(m.dir)
+	return pcapio.WriteFileAtomic(resumePath(m.dir, m.srcID), b, true)
 }
 
 // Close flushes and closes the mirror file.
@@ -298,15 +270,4 @@ func (m *Mirror) Close() error {
 		return err
 	}
 	return nil
-}
-
-func syncFile(f *os.File) error { return unix.Fdatasync(int(f.Fd())) }
-
-func syncDir(dir string) error {
-	d, err := os.Open(dir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
 }

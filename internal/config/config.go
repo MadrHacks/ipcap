@@ -1,6 +1,6 @@
 // Package config loads the shared AD infra configuration (vulnbox.yml,
 // infra.yml) from the config directory, matching trafficsync/sync.py so the
-// collector reuses the same SSH credentials and pcap directory, with mtime
+// collector reuses the same Noise credentials and pcap directory, with mtime
 // reload support.
 package config
 

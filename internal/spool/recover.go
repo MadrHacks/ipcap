@@ -174,7 +174,7 @@ func scanSegment(dir string, srcID uint16, seq uint64, snaplen, linkType uint32,
 		if err := f.Truncate(want); err != nil {
 			return 0, 0, fmt.Errorf("truncate torn tail: %w", err)
 		}
-		if err := syncFile(f); err != nil {
+		if err := pcapio.Fdatasync(f); err != nil {
 			return 0, 0, err
 		}
 	}
@@ -193,7 +193,7 @@ func resetSegment(f *os.File, snaplen, linkType uint32) (int64, uint64, error) {
 	if _, err := f.Write(gh.AppendTo(nil)); err != nil {
 		return 0, 0, err
 	}
-	if err := syncFile(f); err != nil {
+	if err := pcapio.Fdatasync(f); err != nil {
 		return 0, 0, err
 	}
 	return 0, 0, nil
