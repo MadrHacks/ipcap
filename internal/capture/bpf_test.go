@@ -29,35 +29,35 @@ func vlanEthIPv4TCP(dstPort uint16) []byte {
 	return b
 }
 
-func TestExcluderSSHPort(t *testing.T) {
-	e := NewExcluder(uint32(layers.LinkTypeEthernet), 22, nil)
+func TestExcluderPortExclusion(t *testing.T) {
+	e := NewExcluder(uint32(layers.LinkTypeEthernet), []int{22}, nil)
 	host := [4]byte{10, 0, 0, 5}
 	peer := [4]byte{10, 0, 0, 9}
 
 	if !e.Exclude(ethIPv4TCP(54321, 22, peer, host)) {
-		t.Error("inbound SSH (dst 22) should be excluded")
+		t.Error("inbound traffic on excluded port 22 dropped")
 	}
 	if !e.Exclude(ethIPv4TCP(22, 54321, host, peer)) {
-		t.Error("outbound SSH (src 22) should be excluded")
+		t.Error("outbound traffic on excluded port 22 dropped")
 	}
 	if e.Exclude(ethIPv4TCP(1234, 5678, peer, host)) {
-		t.Error("non-SSH game traffic should be kept")
+		t.Error("game traffic on other ports kept")
 	}
 	if !e.Exclude(vlanEthIPv4TCP(22)) {
-		t.Error("VLAN-tagged SSH should be excluded")
+		t.Error("VLAN-tagged excluded-port traffic dropped")
 	}
 }
 
 func TestExcluderCustomPortAndHost(t *testing.T) {
-	e := NewExcluder(uint32(layers.LinkTypeEthernet), 2222, []string{"10.0.0.1", "192.168.9.0/24"})
+	e := NewExcluder(uint32(layers.LinkTypeEthernet), []int{2222}, []string{"10.0.0.1", "192.168.9.0/24"})
 	host := [4]byte{10, 0, 0, 5}
 	peer := [4]byte{10, 0, 0, 9}
 
 	if !e.Exclude(ethIPv4TCP(40000, 2222, peer, host)) {
-		t.Error("SSH on custom port 2222 should be excluded")
+		t.Error("custom excluded port 2222 dropped")
 	}
 	if e.Exclude(ethIPv4TCP(40000, 22, peer, host)) {
-		t.Error("port 22 should NOT be excluded when ssh-port is 2222")
+		t.Error("port 22 kept when only 2222 excluded")
 	}
 	if !e.Exclude(ethIPv4TCP(1234, 5678, [4]byte{10, 0, 0, 1}, peer)) {
 		t.Error("traffic from mgmt host 10.0.0.1 should be excluded")
@@ -70,7 +70,7 @@ func TestExcluderCustomPortAndHost(t *testing.T) {
 // TestExcluderNeverPanics feeds truncated and garbage inputs; a single panic in
 // the capture hot path would let an attacker crash-loop the agent.
 func TestExcluderNeverPanics(t *testing.T) {
-	e := NewExcluder(uint32(layers.LinkTypeEthernet), 22, []string{"10.0.0.1"})
+	e := NewExcluder(uint32(layers.LinkTypeEthernet), []int{22}, []string{"10.0.0.1"})
 	full := ethIPv4TCP(54321, 22, [4]byte{10, 0, 0, 9}, [4]byte{10, 0, 0, 5})
 
 	// Every truncation length.
@@ -94,7 +94,7 @@ func TestExcluderNeverPanics(t *testing.T) {
 		e.Exclude(c) // must not panic
 	}
 
-	raw := NewExcluder(uint32(layers.LinkTypeRaw), 22, nil)
+	raw := NewExcluder(uint32(layers.LinkTypeRaw), []int{22}, nil)
 	for n := 0; n <= 44; n++ {
 		raw.Exclude(full[14 : 14+min(n, len(full)-14)])
 	}

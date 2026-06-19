@@ -4,6 +4,8 @@
 
 > A custom Go PCAP-over-IP relay for the MadrHacks A/D infra, replacing UlisseLab pcap-broker. Persistent capture agent on the vulnbox + collector on the tulip host, SSH-drained, zstd-compressed on the link, exactly-once within the spool retention window.
 
+> **TRANSPORT UPDATE (supersedes the SSH-drain design below):** the link is now the **Noise Protocol** (IK pattern, Curve25519 + ChaCha20-Poly1305 + SHA-256) over TCP — no SSH, no `sshpass`, no PKI. Direction is **pull but inverted role**: the static-IP **vulnbox agent listens** (`ipcap agent listen`, a persistent read-only Noise responder replacing the sshd-spawned `agent serve`); the dynamic-IP **collector dials** it, pins the agent's static public key, and authenticates with its own (the agent allowlists collector keys). Read every "SSH"/"`sshpass`"/"`agent serve`"/"sshd-spawned per connect" below as the Noise listener equivalent. The resume point is sent as the collector's first ACK frame over the wire (not argv). The frame protocol, spool/mirror durability, gpidx resume, and exactly-once guarantees are unchanged — this is purely a transport swap (the frame `PayCRC` already anticipated non-SSH transports). SSH was deleted, not kept as a fallback. Keys via `ipcap keygen`; config: `vulnbox.yml` carries `ip`/`noise_port`/`noise_pubkey`.
+
 
 ## 1. Architecture
 

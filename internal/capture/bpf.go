@@ -8,10 +8,11 @@ import (
 	"github.com/gopacket/gopacket/layers"
 )
 
-// Excluder drops the SSH drain and management traffic so the agent never
-// captures, spools, or re-serves its own control path (which would otherwise
-// amplify without bound). In milestone 1 this is enforced in userspace, before
-// any packet is spooled.
+// Excluder drops the drain and management traffic so the agent never captures,
+// spools, or re-serves its own control path. This is critical: the collector
+// drains over the Noise listener port, and that drain stream IS the re-served
+// data — capturing it creates an unbounded amplification loop. The excluded
+// ports MUST include the Noise listener port.
 //
 // The match runs on every captured packet — adversary-controlled bytes on a
 // CTF game network — so it is a strictly bounded, allocation-free, panic-proof
@@ -20,18 +21,21 @@ import (
 // attacker could feed pathological input to stall or crash the capture hot path.
 type Excluder struct {
 	linkType uint32
-	sshPort  uint16
+	ports    map[uint16]struct{}
 	hosts    []net.IP
 	nets     []*net.IPNet
 }
 
-// NewExcluder builds an excluder for a link type and SSH port. mgmt entries may
-// be bare IPs or CIDRs; traffic to or from any of them is excluded, as is any
-// TCP segment on the SSH port (sshPort <= 0 disables the port rule).
-func NewExcluder(linkType uint32, sshPort int, mgmt []string) *Excluder {
-	e := &Excluder{linkType: linkType}
-	if sshPort > 0 && sshPort <= 0xFFFF {
-		e.sshPort = uint16(sshPort)
+// NewExcluder builds an excluder for a link type. Any TCP segment whose source
+// or destination port is in excludePorts is dropped (this MUST include the Noise
+// drain port to prevent self-capture amplification). mgmt entries may be bare
+// IPs or CIDRs; traffic to or from any of them is also dropped.
+func NewExcluder(linkType uint32, excludePorts []int, mgmt []string) *Excluder {
+	e := &Excluder{linkType: linkType, ports: map[uint16]struct{}{}}
+	for _, p := range excludePorts {
+		if p > 0 && p <= 0xFFFF {
+			e.ports[uint16(p)] = struct{}{}
+		}
 	}
 	for _, m := range mgmt {
 		m = strings.TrimSpace(m)
@@ -54,7 +58,7 @@ func NewExcluder(linkType uint32, sshPort int, mgmt []string) *Excluder {
 // Active reports whether the excluder has any rule, so callers can skip the
 // per-packet parse entirely when nothing is excluded.
 func (e *Excluder) Active() bool {
-	return e.sshPort != 0 || len(e.hosts) > 0 || len(e.nets) > 0
+	return len(e.ports) > 0 || len(e.hosts) > 0 || len(e.nets) > 0
 }
 
 const (
@@ -130,7 +134,7 @@ func (e *Excluder) checkIPv4(data []byte, l3 int) bool {
 			return true
 		}
 	}
-	if e.sshPort == 0 || data[l3+9] != ipProtoTCP {
+	if len(e.ports) == 0 || data[l3+9] != ipProtoTCP {
 		return false
 	}
 	ihl := int(data[l3]&0x0f) * 4
@@ -149,10 +153,10 @@ func (e *Excluder) checkIPv6(data []byte, l3 int) bool {
 			return true
 		}
 	}
-	// Only the common case (TCP directly after the fixed header) is matched;
-	// SSH never rides IPv6 extension-header chains in practice, and not matching
-	// only means we keep a packet, never that we wrongly drop game traffic.
-	if e.sshPort == 0 || data[l3+6] != ipProtoTCP {
+	// Only the common case (TCP directly after the fixed header) is matched; the
+	// drain never rides IPv6 extension-header chains in practice, and not
+	// matching only means we keep a packet, never that we wrongly drop traffic.
+	if len(e.ports) == 0 || data[l3+6] != ipProtoTCP {
 		return false
 	}
 	return e.matchTCPPort(data, l3+40)
@@ -164,7 +168,11 @@ func (e *Excluder) matchTCPPort(data []byte, tcpOff int) bool {
 	}
 	src := binary.BigEndian.Uint16(data[tcpOff : tcpOff+2])
 	dst := binary.BigEndian.Uint16(data[tcpOff+2 : tcpOff+4])
-	return src == e.sshPort || dst == e.sshPort
+	if _, ok := e.ports[src]; ok {
+		return true
+	}
+	_, ok := e.ports[dst]
+	return ok
 }
 
 func (e *Excluder) matchHost(raw []byte) bool {

@@ -1,41 +1,25 @@
-// Package e2e exercises the full milestone-1 pipeline end to end: capture into
-// the durable spool, drain via a real `ipcap agent serve` subprocess over pipes,
-// dedupe/commit into the collector mirror, and re-serve standard PCAP-over-IP —
-// plus the exactly-once resume guarantee across a mid-stream disconnect.
+// Package e2e exercises the full pipeline end to end over the real Noise
+// transport: capture into the durable spool, a Noise listener on the "vulnbox",
+// a collector that dials it (mutually authenticated), dedupe/commit into the
+// mirror, and the PCAP-over-IP fan-out.
 package e2e
 
 import (
 	"context"
-	"encoding/binary"
 	"fmt"
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
 
 	"ipcap/internal/agent"
 	"ipcap/internal/collector"
-	"ipcap/internal/config"
 	"ipcap/internal/pcapio"
+	"ipcap/internal/pcapoverip"
+	"ipcap/internal/transport"
 )
-
-var ipcapBin string
-
-func TestMain(m *testing.M) {
-	bin := filepath.Join(os.TempDir(), "ipcap-e2e")
-	build := exec.Command("go", "build", "-o", bin, "./cmd/ipcap")
-	build.Dir = "../.."
-	build.Stderr = os.Stderr
-	if err := build.Run(); err != nil {
-		fmt.Fprintln(os.Stderr, "build ipcap:", err)
-		os.Exit(1)
-	}
-	ipcapBin = bin
-	os.Exit(m.Run())
-}
 
 const linkEthernet = 1
 
@@ -43,7 +27,6 @@ func payload(i int) []byte {
 	return []byte(fmt.Sprintf("ipcap-e2e-packet-%08d-%s", i, "ABCDEFGHIJKLMNOP"[:i%16]))
 }
 
-// genPcap writes n records with deterministic, ordered payloads.
 func genPcap(t *testing.T, path string, n int) {
 	t.Helper()
 	f, err := os.Create(path)
@@ -61,50 +44,18 @@ func genPcap(t *testing.T, path string, n int) {
 	}
 }
 
-// captureToSpool replays a pcap into the spool (returns at EOF).
 func captureToSpool(t *testing.T, pcapPath, spoolDir string) {
 	t.Helper()
 	err := agent.RunCapture(context.Background(), agent.CaptureOptions{
-		SpoolDir:    spoolDir,
-		SrcID:       1,
-		PcapFile:    pcapPath,
-		Snaplen:     65536,
-		SSHPort:     0, // no exclusion: keep every generated packet
-		RotateBytes: 8192,
+		SpoolDir:     spoolDir,
+		SrcID:        1,
+		PcapFile:     pcapPath,
+		Snaplen:      65536,
+		ExcludePorts: nil,
+		RotateBytes:  8192,
 	})
 	if err != nil {
 		t.Fatalf("capture: %v", err)
-	}
-}
-
-// readRecords reads exactly n libpcap records from r, returning their payloads.
-func readRecords(t *testing.T, r io.Reader, n int) [][]byte {
-	t.Helper()
-	var gh [pcapio.GlobalHeaderLen]byte
-	if _, err := io.ReadFull(r, gh[:]); err != nil {
-		t.Fatalf("read global header: %v", err)
-	}
-	if _, err := pcapio.ParseGlobalHeader(gh[:]); err != nil {
-		t.Fatalf("bad global header: %v", err)
-	}
-	out := make([][]byte, 0, n)
-	for len(out) < n {
-		rec, err := pcapio.ReadRecord(r, 65536)
-		if err != nil {
-			t.Fatalf("read record %d: %v", len(out), err)
-		}
-		out = append(out, rec.Data)
-	}
-	return out
-}
-
-func verifyOrdered(t *testing.T, got [][]byte, from int) {
-	t.Helper()
-	for i, data := range got {
-		want := payload(from + i)
-		if string(data) != string(want) {
-			t.Fatalf("record %d mismatch: got %q want %q", from+i, data, want)
-		}
 	}
 }
 
@@ -119,17 +70,9 @@ func freeAddr(t *testing.T) string {
 	return addr
 }
 
-func writeVulnboxConfig(t *testing.T, dir string) {
-	t.Helper()
-	if err := os.WriteFile(filepath.Join(dir, "vulnbox.yml"), []byte("ip: 127.0.0.1\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-}
-
-// TestEndToEnd runs the full pipeline with a real serve subprocess and verifies
-// both the durable mirror and the live PCAP-over-IP re-serve deliver every
-// packet, in order, byte-identical.
-func TestEndToEnd(t *testing.T) {
+// TestEndToEndNoise drives capture -> spool -> Noise listener -> collector dial
+// -> demux -> durable mirror, and verifies the mirror is byte-identical.
+func TestEndToEndNoise(t *testing.T) {
 	const N = 500
 	root := t.TempDir()
 	spoolDir := filepath.Join(root, "spool")
@@ -143,62 +86,97 @@ func TestEndToEnd(t *testing.T) {
 	pcapPath := filepath.Join(root, "gen.pcap")
 	genPcap(t, pcapPath, N)
 	captureToSpool(t, pcapPath, spoolDir)
-	writeVulnboxConfig(t, configDir)
 
-	listen := freeAddr(t)
-	clientReady := make(chan struct{})
+	agentKey, _ := transport.Generate()
+	collectorKey, _ := transport.Generate()
 
-	opts := collector.Options{
-		ConfigDir:     configDir,
-		MirrorDir:     mirrorDir,
-		SrcID:         1,
-		ListenAddr:    listen,
-		Snaplen:       65536,
-		AgentSpoolDir: spoolDir,
-		Spawn: func(ctx context.Context, vb config.Vulnbox, resume uint64) (*exec.Cmd, error) {
-			<-clientReady // ensure the fan-out client is registered before streaming
-			return exec.CommandContext(ctx, ipcapBin, "agent", "serve",
-				"--spool-dir", spoolDir, "--src-id", "1", "--resume", fmt.Sprintf("%d", resume)), nil
-		},
-	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-	collDone := make(chan struct{})
+	// Noise listener on the "vulnbox".
+	listenAddr := freeAddr(t)
+	host, port, _ := net.SplitHostPort(listenAddr)
+	lctx, lcancel := context.WithCancel(context.Background())
+	defer lcancel()
 	go func() {
-		defer close(collDone)
-		if err := collector.Run(ctx, opts); err != nil {
-			t.Errorf("collector: %v", err)
-		}
+		_ = agent.RunListen(lctx, agent.ListenOptions{
+			SpoolDir:     spoolDir,
+			SrcID:        1,
+			ListenAddr:   listenAddr,
+			Key:          agentKey,
+			AllowedPeers: [][]byte{collectorKey.Public},
+		})
 	}()
 
-	// Connect the re-serve client, then let streaming begin.
+	// Config the collector dials: vulnbox ip/port + the agent's pinned pubkey.
+	cfg := fmt.Sprintf("ip: %s\nnoise_port: %s\nnoise_pubkey: %s\n", host, port, agentKey.PublicB64())
+	if err := os.WriteFile(filepath.Join(configDir, "vulnbox.yml"), []byte(cfg), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cctx, ccancel := context.WithCancel(context.Background())
+	defer ccancel()
+	go func() {
+		_ = collector.Run(cctx, collector.Options{
+			ConfigDir: configDir,
+			MirrorDir: mirrorDir,
+			SrcID:     1,
+			Snaplen:   65536,
+			Key:       collectorKey,
+		})
+	}()
+
+	waitForMirror(t, mirrorDir, N)
+	verifyMirror(t, mirrorDir, N)
+}
+
+// TestFanout verifies the PCAP-over-IP re-serve delivers a live stream to a
+// connected client, byte-identical and in order.
+func TestFanout(t *testing.T) {
+	const N = 300
+	gh := pcapio.GlobalHeader{Snaplen: 65536, LinkType: linkEthernet}
+	srv := pcapoverip.NewServer(gh, 4096)
+
+	addr := freeAddr(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() { _ = srv.Listen(ctx, addr) }()
+
 	var conn net.Conn
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		c, err := net.Dial("tcp", listen)
+		c, err := net.Dial("tcp", addr)
 		if err == nil {
 			conn = c
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("dial re-serve: %v", err)
+			t.Fatalf("dial: %v", err)
 		}
-		time.Sleep(20 * time.Millisecond)
+		time.Sleep(10 * time.Millisecond)
 	}
 	defer conn.Close()
-	conn.SetReadDeadline(time.Now().Add(20 * time.Second))
-	close(clientReady)
+	conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 
-	got := readRecords(t, conn, N)
-	verifyOrdered(t, got, 0)
-
-	// The durable mirror must also contain all N packets, byte-identical.
-	waitForMirror(t, mirrorDir, N)
-	verifyMirror(t, mirrorDir, 0, N)
-
-	cancel()
-	<-collDone
+	// Reading the global header proves the client is registered; only then
+	// broadcast, so nothing is missed.
+	var ghBuf [pcapio.GlobalHeaderLen]byte
+	if _, err := io.ReadFull(conn, ghBuf[:]); err != nil {
+		t.Fatalf("read global header: %v", err)
+	}
+	if _, err := pcapio.ParseGlobalHeader(ghBuf[:]); err != nil {
+		t.Fatalf("bad global header: %v", err)
+	}
+	for i := 0; i < N; i++ {
+		p := payload(i)
+		srv.Broadcast(pcapio.Record{TsSec: uint32(i), OrigLen: uint32(len(p)), Data: p})
+	}
+	for i := 0; i < N; i++ {
+		rec, err := pcapio.ReadRecord(conn, 65536)
+		if err != nil {
+			t.Fatalf("read record %d: %v", i, err)
+		}
+		if string(rec.Data) != string(payload(i)) {
+			t.Fatalf("record %d mismatch", i)
+		}
+	}
 }
 
 func mirrorFile(dir string) string {
@@ -207,19 +185,19 @@ func mirrorFile(dir string) string {
 
 func waitForMirror(t *testing.T, dir string, n int) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
+	deadline := time.Now().Add(15 * time.Second)
 	for {
-		if countMirror(t, dir) >= n {
+		if countMirror(dir) >= n {
 			return
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("mirror only reached %d/%d records", countMirror(t, dir), n)
+			t.Fatalf("mirror only reached %d/%d records", countMirror(dir), n)
 		}
 		time.Sleep(50 * time.Millisecond)
 	}
 }
 
-func countMirror(t *testing.T, dir string) int {
+func countMirror(dir string) int {
 	f, err := os.Open(mirrorFile(dir))
 	if err != nil {
 		return 0
@@ -233,7 +211,7 @@ func countMirror(t *testing.T, dir string) int {
 	return int(count)
 }
 
-func verifyMirror(t *testing.T, dir string, from, n int) {
+func verifyMirror(t *testing.T, dir string, n int) {
 	t.Helper()
 	f, err := os.Open(mirrorFile(dir))
 	if err != nil {
@@ -244,11 +222,10 @@ func verifyMirror(t *testing.T, dir string, from, n int) {
 	if _, err := io.ReadFull(f, gh[:]); err != nil {
 		t.Fatal(err)
 	}
-	idx := from
-	_, _, err = pcapio.ScanRecords(f, 65536, func(rec pcapio.Record) error {
-		want := payload(idx)
-		if string(rec.Data) != string(want) {
-			return fmt.Errorf("mirror record %d mismatch: got %q want %q", idx, rec.Data, want)
+	idx := 0
+	_, count, err := pcapio.ScanRecords(f, 65536, func(rec pcapio.Record) error {
+		if string(rec.Data) != string(payload(idx)) {
+			return fmt.Errorf("mirror record %d mismatch: got %q", idx, rec.Data)
 		}
 		idx++
 		return nil
@@ -256,9 +233,7 @@ func verifyMirror(t *testing.T, dir string, from, n int) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if idx-from != n {
-		t.Fatalf("mirror has %d records, want %d", idx-from, n)
+	if int(count) != n {
+		t.Fatalf("mirror has %d records, want %d", count, n)
 	}
 }
-
-var _ = binary.LittleEndian

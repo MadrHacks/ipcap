@@ -14,12 +14,16 @@ import (
 // DefaultConfigDir mirrors trafficsync's AD_INFRA_CONFIG_DIR default.
 const DefaultConfigDir = "/config"
 
-// Vulnbox is the subset of vulnbox.yml the collector needs.
+// DefaultNoisePort is the agent's default Noise listener port.
+const DefaultNoisePort = 7878
+
+// Vulnbox is the subset of vulnbox.yml the collector needs to dial the agent's
+// Noise listener: the (static) vulnbox IP, the listener port, and the agent's
+// static public key, which the collector pins.
 type Vulnbox struct {
 	IP          string `yaml:"ip"`
-	SSHUser     string `yaml:"ssh_user"`
-	SSHPassword string `yaml:"ssh_password"`
-	SSHPort     int    `yaml:"ssh_port"`
+	NoisePort   int    `yaml:"noise_port"`
+	NoisePubKey string `yaml:"noise_pubkey"`
 }
 
 // Infra is the subset of infra.yml the collector needs.
@@ -27,20 +31,12 @@ type Infra struct {
 	PcapDir string `yaml:"pcap_dir"`
 }
 
-// User returns the SSH user, defaulting to root like sync.py.
-func (v Vulnbox) User() string {
-	if v.SSHUser == "" {
-		return "root"
-	}
-	return v.SSHUser
-}
-
-// Port returns the SSH port, defaulting to 22.
+// Port returns the Noise listener port, defaulting to DefaultNoisePort.
 func (v Vulnbox) Port() int {
-	if v.SSHPort == 0 {
-		return 22
+	if v.NoisePort == 0 {
+		return DefaultNoisePort
 	}
-	return v.SSHPort
+	return v.NoisePort
 }
 
 // ConfigDir resolves the config directory from the environment.

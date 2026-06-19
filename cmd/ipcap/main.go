@@ -1,7 +1,7 @@
-// Command ipcap is a durable, SSH-drained PCAP-over-IP transport for the
-// MadrHacks A/D infra: a persistent capture agent on the vulnbox and a collector
-// on the tulip host, with exactly-once delivery within the spool retention
-// window. See DESIGN.md.
+// Command ipcap is a durable, Noise-secured PCAP-over-IP transport for the
+// MadrHacks A/D infra: a persistent capture+listen agent on the vulnbox and a
+// collector on the tulip host, with exactly-once delivery within the spool
+// retention window. See DESIGN.md.
 package main
 
 import (
@@ -16,6 +16,7 @@ import (
 
 	"ipcap/internal/agent"
 	"ipcap/internal/collector"
+	"ipcap/internal/transport"
 )
 
 // version is overridden at build time via -ldflags "-X main.version=...".
@@ -27,26 +28,25 @@ func main() {
 
 	root := &cobra.Command{
 		Use:           "ipcap",
-		Short:         "Durable SSH-drained PCAP-over-IP transport",
+		Short:         "Durable Noise-secured PCAP-over-IP transport",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}
 	root.SetOut(os.Stderr)
-	root.AddCommand(agentCmd(), collectorCmd(), recoverCmd(), versionCmd())
+	root.AddCommand(agentCmd(), collectorCmd(), recoverCmd(), keygenCmd(), versionCmd())
 
 	if err := root.Execute(); err != nil {
 		log.Fatalf("ipcap: %v", err)
 	}
 }
 
-// signalContext cancels on SIGINT/SIGTERM for graceful shutdown.
 func signalContext() (context.Context, context.CancelFunc) {
 	return signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 }
 
 func agentCmd() *cobra.Command {
-	cmd := &cobra.Command{Use: "agent", Short: "Vulnbox-side capture and serve"}
-	cmd.AddCommand(agentCaptureCmd(), agentServeCmd())
+	cmd := &cobra.Command{Use: "agent", Short: "Vulnbox-side capture and Noise listener"}
+	cmd.AddCommand(agentCaptureCmd(), agentListenCmd())
 	return cmd
 }
 
@@ -68,40 +68,62 @@ func agentCaptureCmd() *cobra.Command {
 	f.StringVar(&opts.PcapFile, "pcap-file", "", "replay a pcap file instead of live capture")
 	f.IntVar(&opts.Snaplen, "snaplen", 65536, "capture snap length")
 	f.IntVar(&opts.RingMiB, "ring-mib", 256, "AF_PACKET ring size (MiB)")
-	f.IntVar(&opts.SSHPort, "ssh-port", 22, "SSH port to exclude from capture")
+	f.IntSliceVar(&opts.ExcludePorts, "exclude-port", []int{7878}, "TCP ports to exclude from capture; MUST include the Noise drain port")
 	f.StringSliceVar(&opts.Mgmt, "mgmt", nil, "management IPs/CIDRs to exclude")
 	f.Int64Var(&opts.RetentionBytes, "retention-bytes", 48<<30, "spool byte cap")
 	f.Int64Var(&opts.RotateBytes, "rotate-bytes", 64<<20, "segment rotation size")
 	return cmd
 }
 
-func agentServeCmd() *cobra.Command {
-	var opts agent.ServeOptions
+func agentListenCmd() *cobra.Command {
+	var (
+		opts     agent.ListenOptions
+		keyFile  string
+		peerB64s []string
+	)
 	cmd := &cobra.Command{
-		Use:   "serve",
-		Short: "Stream the spool to a connected collector (stdin/stdout)",
+		Use:   "listen",
+		Short: "Serve the spool to authenticated collectors over Noise",
 		RunE: func(c *cobra.Command, _ []string) error {
+			key, err := transport.LoadPrivateKeyFile(keyFile)
+			if err != nil {
+				return fmt.Errorf("load --key: %w", err)
+			}
+			peers, err := transport.ParsePublicKeys(peerB64s)
+			if err != nil {
+				return fmt.Errorf("parse --peer: %w", err)
+			}
+			opts.Key = key
+			opts.AllowedPeers = peers
 			ctx, cancel := signalContext()
 			defer cancel()
-			opts.In = os.Stdin
-			opts.Out = os.Stdout
-			return agent.RunServe(ctx, opts)
+			return agent.RunListen(ctx, opts)
 		},
 	}
 	f := cmd.Flags()
 	f.StringVar(&opts.SpoolDir, "spool-dir", "/var/lib/ipcap/spool", "durable spool directory")
 	f.Uint16Var(&opts.SrcID, "src-id", 1, "source id")
 	f.StringVar(&opts.SrcName, "src-name", "", "source name")
-	f.Uint64Var(&opts.Resume, "resume", 0, "resume from this gpidx (next needed)")
+	f.StringVar(&opts.ListenAddr, "listen", ":7878", "Noise listen address")
+	f.StringVar(&keyFile, "key", "/etc/ipcap/agent.key", "this agent's private key file (base64)")
+	f.StringSliceVar(&peerB64s, "peer", nil, "authorized collector public key (base64; repeatable)")
 	return cmd
 }
 
 func collectorCmd() *cobra.Command {
-	var opts collector.Options
+	var (
+		opts    collector.Options
+		keyFile string
+	)
 	cmd := &cobra.Command{
 		Use:   "collector",
-		Short: "Tulip-host-side SSH drain, mirror, and PCAP-over-IP re-serve",
+		Short: "Tulip-host-side Noise drain, mirror, and PCAP-over-IP re-serve",
 		RunE: func(c *cobra.Command, _ []string) error {
+			key, err := transport.LoadPrivateKeyFile(keyFile)
+			if err != nil {
+				return fmt.Errorf("load --key: %w", err)
+			}
+			opts.Key = key
 			ctx, cancel := signalContext()
 			defer cancel()
 			return collector.Run(ctx, opts)
@@ -114,9 +136,8 @@ func collectorCmd() *cobra.Command {
 	f.StringVar(&opts.SrcName, "src-name", "", "source name")
 	f.StringVar(&opts.ListenAddr, "listen", ":4242", "local PCAP-over-IP re-serve address")
 	f.Uint32Var(&opts.Snaplen, "snaplen", 65536, "snap length")
-	f.StringVar(&opts.AgentBin, "agent-bin", "ipcap", "remote ipcap binary path")
-	f.StringVar(&opts.AgentSpoolDir, "agent-spool-dir", "/var/lib/ipcap/spool", "remote spool directory")
 	f.IntVar(&opts.BufSize, "buf-size", 1<<16, "per-client fan-out buffer (records)")
+	f.StringVar(&keyFile, "key", "/etc/ipcap/collector.key", "this collector's private key file (base64)")
 	return cmd
 }
 
@@ -136,6 +157,32 @@ func recoverCmd() *cobra.Command {
 	f.Uint16Var(&srcID, "src-id", 1, "source id")
 	f.Uint32Var(&snaplen, "snaplen", 65536, "snap length")
 	f.Uint32Var(&linkType, "link-type", 1, "link type (1=Ethernet)")
+	return cmd
+}
+
+func keygenCmd() *cobra.Command {
+	var out string
+	cmd := &cobra.Command{
+		Use:   "keygen",
+		Short: "Generate a Noise static keypair",
+		RunE: func(c *cobra.Command, _ []string) error {
+			k, err := transport.Generate()
+			if err != nil {
+				return err
+			}
+			if out != "" {
+				if err := os.WriteFile(out, []byte(k.PrivateB64()+"\n"), 0o600); err != nil {
+					return err
+				}
+				fmt.Fprintf(os.Stderr, "wrote private key to %s\n", out)
+				fmt.Fprintf(os.Stdout, "public key: %s\n", k.PublicB64())
+				return nil
+			}
+			fmt.Fprintf(os.Stdout, "private: %s\npublic:  %s\n", k.PrivateB64(), k.PublicB64())
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&out, "out", "", "write the private key to this file (0600); print public to stdout")
 	return cmd
 }
 

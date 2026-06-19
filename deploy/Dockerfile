@@ -10,10 +10,9 @@ RUN CGO_ENABLED=0 go build -trimpath \
     -ldflags "-X main.version=${VERSION} -s -w" \
     -o /ipcap ./cmd/ipcap
 
-# Collector image: needs ssh + sshpass to drain the vulnbox agent (mirrors the
-# trafficsync wiring: creds from /config/vulnbox.yml).
+# Collector image: drains the vulnbox agent over Noise (no ssh, no sshpass).
 FROM alpine:3.20
-RUN apk add --no-cache openssh-client sshpass ca-certificates
+RUN apk add --no-cache ca-certificates
 COPY --from=build /ipcap /usr/local/bin/ipcap
 ENTRYPOINT ["/usr/local/bin/ipcap"]
 CMD ["collector"]

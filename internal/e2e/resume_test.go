@@ -40,7 +40,7 @@ func genBigPcap(t *testing.T, path string, n int) {
 func captureBig(t *testing.T, pcapPath, spoolDir string) {
 	t.Helper()
 	if err := agent.RunCapture(context.Background(), agent.CaptureOptions{
-		SpoolDir: spoolDir, SrcID: 1, PcapFile: pcapPath, Snaplen: 65536, SSHPort: 0, RotateBytes: 256 << 10,
+		SpoolDir: spoolDir, SrcID: 1, PcapFile: pcapPath, Snaplen: 65536, RotateBytes: 256 << 10,
 	}); err != nil {
 		t.Fatalf("capture: %v", err)
 	}

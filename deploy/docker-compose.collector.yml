@@ -1,7 +1,11 @@
-# Collector service, mirroring the trafficsync wiring: it reads vulnbox.yml /
-# infra.yml from /config, drains the vulnbox agent over SSH, writes a durable
+# Collector service: reads vulnbox.yml / infra.yml from /config, dials the
+# vulnbox agent's Noise listener (pinning its noise_pubkey), writes a durable
 # mirror to /traffic, and re-serves standard PCAP-over-IP on :4242 for the tulip
-# assembler and suricata. Merge into the tulip docker-compose.
+# assembler and suricata. No ssh. Merge into the tulip docker-compose.
+#
+# Setup: `ipcap keygen --out collector.key` on the host; put the printed public
+# key in deploy/ipcap-agent-listen.service's --peer on each vulnbox, and put each
+# agent's public key in that vulnbox's vulnbox.yml as noise_pubkey.
 services:
   ipcap-collector:
     build:
@@ -14,13 +18,13 @@ services:
       - --config-dir=/config
       - --mirror-dir=/traffic
       - --listen=:4242
-      - --agent-spool-dir=/var/lib/ipcap/spool
+      - --key=/keys/collector.key
     volumes:
       - ./config:/config:ro
+      - ./keys/collector.key:/keys/collector.key:ro
       - ipcap-mirror:/traffic
     ports:
-      # Expose the re-served PCAP-over-IP locally; tulip's assembler/suricata
-      # connect to ipcap-collector:4242 on the compose network.
+      # tulip's assembler/suricata connect to ipcap-collector:4242 on the network.
       - "4242:4242"
 
 volumes:

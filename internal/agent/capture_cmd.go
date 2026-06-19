@@ -22,7 +22,7 @@ type CaptureOptions struct {
 	PcapFile       string // offline replay source (testing); takes precedence
 	Snaplen        int
 	RingMiB        int
-	SSHPort        int
+	ExcludePorts   []int // TCP ports to drop; MUST include the Noise drain port
 	Mgmt           []string
 	RetentionBytes int64
 	RotateBytes    int64
@@ -54,12 +54,12 @@ func RunCapture(ctx context.Context, opts CaptureOptions) error {
 	defer src.Close()
 
 	linkType := src.LinkType()
-	excluder := capture.NewExcluder(linkType, opts.SSHPort, opts.Mgmt)
-	// Make the self-capture exclusion visible: ssh-port MUST match the vulnbox
-	// sshd port (and/or --mgmt cover the collector host) or the serve drain is
-	// recaptured and re-served, amplifying without bound.
-	log.Printf("capture: src=%d iface=%q spool=%q excluding ssh-port=%d mgmt=%v",
-		opts.SrcID, opts.Iface, opts.SpoolDir, opts.SSHPort, opts.Mgmt)
+	excluder := capture.NewExcluder(linkType, opts.ExcludePorts, opts.Mgmt)
+	// Make the self-capture exclusion visible: exclude-ports MUST include the
+	// Noise drain port, or the drain stream is recaptured and re-served,
+	// amplifying without bound.
+	log.Printf("capture: src=%d iface=%q spool=%q excluding tcp-ports=%v mgmt=%v",
+		opts.SrcID, opts.Iface, opts.SpoolDir, opts.ExcludePorts, opts.Mgmt)
 
 	w, err := spool.NewWriter(spool.Config{
 		Dir:         opts.SpoolDir,
