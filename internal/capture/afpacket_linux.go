@@ -5,6 +5,7 @@ package capture
 import (
 	"errors"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/gopacket/gopacket/afpacket"
@@ -43,7 +44,26 @@ func OpenAFPacket(iface string, ringMiB, snaplen int) (*AFPacketSource, error) {
 	if err != nil {
 		return nil, err
 	}
-	return &AFPacketSource{tp: tp, linkType: uint32(layers.LinkTypeEthernet)}, nil
+	return &AFPacketSource{tp: tp, linkType: linkTypeForIface(iface)}, nil
+}
+
+// linkTypeForIface returns the link type AF_PACKET delivers for iface, read from
+// its ARPHRD hardware type (/sys/class/net/<iface>/type) the same way libpcap
+// derives a DLT. Ethernet NICs — and bridges, veth, loopback — deliver Ethernet
+// frames; a layer-3 tunnel like WireGuard (ARPHRD_NONE) has no link-layer header
+// and delivers raw IP, which must be declared as such or a downstream parser
+// reads the IP header as Ethernet and decodes nothing.
+func linkTypeForIface(iface string) uint32 {
+	b, err := os.ReadFile("/sys/class/net/" + iface + "/type")
+	if err != nil {
+		return uint32(layers.LinkTypeEthernet)
+	}
+	switch strings.TrimSpace(string(b)) {
+	case "65534": // ARPHRD_NONE — WireGuard / TUN: raw IP, no link layer
+		return uint32(layers.LinkTypeRaw)
+	default: // ARPHRD_ETHER (1), ARPHRD_LOOPBACK (772), …
+		return uint32(layers.LinkTypeEthernet)
+	}
 }
 
 func (s *AFPacketSource) ReadPacket() (time.Time, []byte, int, error) {
