@@ -21,7 +21,7 @@ RUN CGO_ENABLED=0 GOARCH=$TARGETARCH go build -trimpath \
 # Pinned, multi-arch (amd64+arm64) official eCapture image — Alpine-based, ships
 # the static eCapture at /ecapture. It tracks upstream, which MadrHacks/ecapture
 # follows; bump the tag when the fork ships its own release.
-FROM gojue/ecapture:v2.4.0
+FROM gojue/ecapture:v2.4.2
 COPY --from=build /ipcap /usr/local/bin/ipcap
 # eCapture lives at /ecapture in the base; expose it where the agent expects it.
 RUN ln -sf /ecapture /usr/local/bin/ecapture
