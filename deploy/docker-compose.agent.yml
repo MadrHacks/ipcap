@@ -39,7 +39,11 @@ services:
       - --iface=${IPCAP_IFACE:-game}
       - --spool-dir=/spool
       - --src-id=1
-      - --exclude-port=7878
+      # 7878 is the Noise drain (MUST stay — excluding it prevents an
+      # amplification loop). 22 drops SSH: the game link also carries the old
+      # infra's rsync-over-SSH of prior captures, which is non-game bulk traffic
+      # that otherwise dwarfs (~99%) and backlogs the real service traffic.
+      - --exclude-port=7878,22
       - --ring-mib=256
     volumes:
       - ipcap-spool:/spool
