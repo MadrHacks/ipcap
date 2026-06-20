@@ -39,11 +39,15 @@ services:
       - --iface=${IPCAP_IFACE:-game}
       - --spool-dir=/spool
       - --src-id=1
-      # 7878 is the Noise drain (MUST stay — excluding it prevents an
-      # amplification loop). 22 drops SSH: the game link also carries the old
-      # infra's rsync-over-SSH of prior captures, which is non-game bulk traffic
-      # that otherwise dwarfs (~99%) and backlogs the real service traffic.
-      - --exclude-port=7878,22
+      # Ports kept OUT of capture. The default covers a standalone deploy; the
+      # autoconfig deploy overrides IPCAP_EXCLUDE_PORTS in .env to also drop the
+      # firegex web-UI port (management traffic — not game traffic, and it carries
+      # the firegex password). Always excluded:
+      #   7878  ipcap's own Noise drain — MUST stay; excluding it prevents an
+      #         amplification loop (capturing the very traffic we ship out).
+      #   22    SSH — the game link also carries the old infra's rsync-over-SSH of
+      #         prior captures, non-game bulk that dwarfs (~99%) the real traffic.
+      - --exclude-port=${IPCAP_EXCLUDE_PORTS:-7878,22}
       - --ring-mib=256
     volumes:
       - ipcap-spool:/spool
